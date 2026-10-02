@@ -132,17 +132,20 @@ batched:
   single aggregate PR (labeled `bulk-merge-pr`) against `master` for bulk review and merge. If a
   PR fails to cherry-pick cleanly or stops being mergeable, it's dropped from that batch (label
   removed, comment left) rather than blocking the others.
-* Once the aggregate PR merges, every original PR it included is closed automatically with a
-  pointer to the aggregate PR.
+* Once the aggregate PR merges, every original PR it included is closed automatically -- without
+  being merged itself, since its change already landed via the aggregate PR -- with a comment
+  linking back to it.
 
 Both the batching and un-batching are fully automatic -- no one approves a PR into the batch by
 hand. The visibility/opt-out window (the triage comment, and the `no-merge-train` label) is what
 substitutes for that manual step. The aggregate PR itself still goes through normal required CI
 and the merge queue, and a human reviews and merges it.
 
-Note: because the aggregate PR merges squash-only, the final commit on `master` is attributed to
-whoever merges it; per-original-author git attribution is only preserved up through the
-cherry-pick stage, not in the final squashed commit.
+Attribution: `git cherry-pick` preserves each original commit's author, so every batched PR's
+author is still the recorded author of their commit(s) on the aggregate branch. GitHub
+automatically adds a `Co-authored-by:` trailer to the squash commit for every distinct author it
+contains, and the aggregate PR body additionally lists every included PR's author so reviewers
+see the full contributor list up front.
 
 If your PR implements a workstream from a quarterly roadmap issue (labeled `roadmap`), reference
 it with `Roadmap-Item: #<issue-number>` in the PR description (the template includes this field).

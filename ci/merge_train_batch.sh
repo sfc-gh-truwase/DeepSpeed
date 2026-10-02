@@ -11,6 +11,16 @@
 #
 # A failed gh call must fail the script; a failed cherry-pick for one PR must
 # not abort the batch for the others.
+#
+# Attribution: `git cherry-pick` preserves each original commit's Author
+# field untouched (only the committer becomes this bot), so every included
+# PR's author is still the recorded author of their commit(s) on the
+# aggregate branch. When the aggregate PR is squash-merged, GitHub
+# automatically adds a `Co-authored-by:` trailer to the squash commit for
+# every distinct commit author it contains -- no extra git plumbing needed
+# here for that. This script additionally lists every included PR's author
+# by @login in the aggregate PR body so reviewers see the full contributor
+# list up front, independent of how the PR is eventually merged.
 set -euo pipefail
 
 MERGE_TRAIN_LABEL="merge-train"
@@ -41,13 +51,15 @@ main() {
 
     local included=()
     local excluded=()
+    local contributors=()
 
     while IFS=$'\t' read -r number title; do
         [ -z "$number" ] && continue
 
         # Re-verify right before batching: the label may be hours/days stale.
-        local mergeable
-        mergeable=$(gh pr view "$number" --repo "$GITHUB_REPOSITORY" --json mergeable --jq '.mergeable')
+        local mergeable author
+        IFS=$'\t' read -r mergeable author <<< "$(gh pr view "$number" --repo "$GITHUB_REPOSITORY" \
+            --json mergeable,author --jq '[.mergeable, .author.login] | @tsv')"
         if [ "$mergeable" = "CONFLICTING" ]; then
             echo "PR #$number ($title): no longer mergeable, excluding"
             excluded+=("$number: not mergeable with current master")
@@ -62,8 +74,9 @@ main() {
         base=$(git merge-base origin/master "pr-${number}")
 
         if git cherry-pick -x "${base}..pr-${number}"; then
-            echo "PR #$number ($title): cherry-picked cleanly"
+            echo "PR #$number ($title): cherry-picked cleanly (author: @$author)"
             included+=("#$number $title")
+            contributors+=("@$author (#$number)")
         else
             echo "PR #$number ($title): cherry-pick conflict, excluding"
             git cherry-pick --abort || true
@@ -85,6 +98,9 @@ main() {
         echo
         echo "Included:"
         printf -- '- %s\n' "${included[@]}"
+        echo
+        echo "Contributors (original PR authors, credited here and via Co-authored-by on squash merge, since \`git cherry-pick\` preserves each commit's original author):"
+        printf -- '- %s\n' "${contributors[@]}"
         if [ "${#excluded[@]}" -gt 0 ]; then
             echo
             echo "Excluded this run (left on merge-train for next time, or already un-flagged):"

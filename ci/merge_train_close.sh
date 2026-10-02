@@ -5,11 +5,13 @@
 # cherry-picked, pointing authors at the aggregate PR
 # (.github/workflows/merge-train-close.yml).
 #
-# Note (documented, not engineered around): the aggregate PR merges squash-only,
-# so the final commit on master is attributed to whoever merged it -- per-author
-# git attribution is only preserved up to the cherry-pick stage. Maintainers
-# merging an individual batch that should keep author attribution can use a
-# non-squash merge for that one PR instead.
+# Each original PR is closed, never merged directly -- its change already
+# landed on master as part of the aggregate PR's squash commit. `git
+# cherry-pick` preserves each commit's original author, so GitHub
+# automatically adds a Co-authored-by trailer to that squash commit for every
+# distinct author among the batched PRs (see merge_train_batch.sh); the
+# close comment below additionally points each author at the aggregate PR
+# where they're credited.
 set -euo pipefail
 
 AGGREGATE_PR_NUMBER="$1"
@@ -32,7 +34,7 @@ if [ -z "$numbers" ]; then
 fi
 
 for n in $numbers; do
-    echo "closing original PR #$n, superseded by #$AGGREGATE_PR_NUMBER"
+    echo "closing original PR #$n (without merging it), superseded by #$AGGREGATE_PR_NUMBER"
     run gh pr close "$n" --repo "$GITHUB_REPOSITORY" --comment \
-        "Merged via bulk batch in #$AGGREGATE_PR_NUMBER."
+        "Closing this PR without merging it: its change already landed on master via the merge-train batch #$AGGREGATE_PR_NUMBER, which has just merged. You're credited as a contributor on that PR."
 done
