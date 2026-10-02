@@ -120,6 +120,35 @@ Information about how this check works is here: https://github.com/dcoapp/app?ta
 
 To sign commits, you will need to include `-s` when running `git commit`. For example, `git commit -s -m "Commit message"`. One note, creating PRs via the GitHub interface do not appear to include this option.  If you forget this, clicking on the failing check in your PR will point you to commands you can run to rebase and sign previous commits.
 
+## Merge-train for small PRs
+To keep reviewer and CI bandwidth focused on PRs that need real scrutiny, small/low-risk PRs
+(roughly: under 30 changed lines across at most 3 files, not touching GPU-sensitive code, see
+`.github/merge-train-config.yml` for the exact thresholds) are automatically detected and
+batched:
+
+* A scheduled workflow labels qualifying open PRs `merge-train` and comments to say so. If your
+  PR shouldn't be batched, remove the label or add `no-merge-train`.
+* A weekly workflow cherry-picks every `merge-train`-labeled PR onto one branch and opens a
+  single aggregate PR (labeled `bulk-merge-pr`) against `master` for bulk review and merge. If a
+  PR fails to cherry-pick cleanly or stops being mergeable, it's dropped from that batch (label
+  removed, comment left) rather than blocking the others.
+* Once the aggregate PR merges, every original PR it included is closed automatically with a
+  pointer to the aggregate PR.
+
+Both the batching and un-batching are fully automatic -- no one approves a PR into the batch by
+hand. The visibility/opt-out window (the triage comment, and the `no-merge-train` label) is what
+substitutes for that manual step. The aggregate PR itself still goes through normal required CI
+and the merge queue, and a human reviews and merges it.
+
+Note: because the aggregate PR merges squash-only, the final commit on `master` is attributed to
+whoever merges it; per-original-author git attribution is only preserved up through the
+cherry-pick stage, not in the final squashed commit.
+
+If your PR implements a workstream from a quarterly roadmap issue (labeled `roadmap`), reference
+it with `Roadmap-Item: #<issue-number>` in the PR description (the template includes this field).
+That gets your PR labeled `roadmap-pr` and prioritized for individual review instead of being
+considered for merge-train batching.
+
 ## Code of Conduct
 This project has adopted the [Microsoft Open Source Code of
 Conduct](https://opensource.microsoft.com/codeofconduct/). For more information see the
