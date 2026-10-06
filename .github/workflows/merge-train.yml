@@ -1,0 +1,47 @@
+name: merge-train
+
+# Weekly cherry-pick bot: batches every PR currently labeled `merge-train`
+# (applied by merge-train-triage.yml) onto one integration branch and opens a
+# single aggregate PR against master for bulk review+merge
+# (ci/merge_train_batch.sh). The aggregate PR still goes through normal
+# required CI and the merge queue -- a human reviews and merges it; automation
+# stops at opening it. See CONTRIBUTING.md ("Merge-train for small PRs").
+
+on:
+  schedule:
+    - cron: '42 6 * * 1'
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: 'Log intended cherry-pick/PR actions without pushing or calling write APIs'
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+jobs:
+  batch:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: write
+      pull-requests: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+          persist-credentials: true
+
+      - name: Configure git identity for cherry-picks
+        run: |
+          git config user.name "deepspeed-merge-train[bot]"
+          git config user.email "deepspeed-merge-train[bot]@users.noreply.github.com"
+
+      - name: Build the merge-train batch PR
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+          DRY_RUN: ${{ inputs.dry_run || 'false' }}
+        run: bash ci/merge_train_batch.sh

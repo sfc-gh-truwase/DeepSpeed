@@ -1,0 +1,59 @@
+# Config for the merge-train automation
+# (.github/workflows/merge-train*.yml, ci/merge_train_*.py).
+#
+# Single source of truth for the "is this PR tiny and safe to auto-batch"
+# heuristic, so the triage and batching workflows can't drift from each other.
+
+# A PR must be at or under both of these to count as "tiny".
+max_changed_lines: 30
+max_changed_files: 3
+
+# Labels that disqualify a PR from auto-batching even if it's tiny.
+# roadmap-pr: roadmap work is prioritized for individual review, not batched.
+# no-merge-train: manual opt-out for an author or maintainer.
+excluded_labels:
+  - roadmap-pr
+  - no-merge-train
+
+# Path globs that mark a PR as GPU-sensitive and therefore ineligible for
+# blind batch cherry-picking, no matter how small the diff. This is the union
+# of the `pull_request.paths` filters already used by the GPU-vendor CI
+# workflows (nv-*.yml, amd-mi200.yml, hpu-gaudi2*.yml, xpu-*.yml,
+# mps-torch-latest.yml) -- update this list when those filters change rather
+# than maintaining a second, independent judgment call about what's "GPU
+# code".
+gpu_sensitive_paths:
+  - accelerator/**
+  - op_builder/hpu/**
+  - op_builder/xpu/**
+  - op_builder/mps/**
+  - csrc/**
+  - deepspeed/inference/**
+  - deepspeed/sequence/**
+  - deepspeed/comm/**
+  - deepspeed/runtime/engine.py
+  - deepspeed/runtime/bf16_optimizer.py
+  - deepspeed/runtime/hybrid_engine.py
+  - deepspeed/runtime/utils.py
+  - deepspeed/runtime/zero/**
+  - deepspeed/runtime/pipe/engine.py
+  - deepspeed/module_inject/**
+  - deepspeed/model_implementations/diffusers/**
+  - deepspeed/ops/transformer/**
+  - deepspeed/ops/adam/**
+  - tests/unit/inference/**
+  - tests/unit/v1/sequence_parallelism/**
+  - tests/unit/accelerator/**
+  - tests/unit/ops/adam/**
+  - tests/unit/comm/**
+
+# If true, all of a PR's *required* status checks (gh pr checks --required)
+# must be successful for it to be eligible.
+required_checks_must_be_green: true
+
+# A PR older than this (by creation date) is excluded from auto-batching,
+# even if it's otherwise tiny/green/non-GPU -- it needs a maintainer to look
+# at why it's gone untouched this long rather than silently riding into a
+# batch. Set to match the ~2-week release cadence; raise it if that proves
+# too aggressive in practice.
+max_age_days: 14
