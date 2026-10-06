@@ -128,10 +128,16 @@ batched:
 
 * A scheduled workflow labels qualifying open PRs `merge-train` and comments to say so. If your
   PR shouldn't be batched, remove the label or add `no-merge-train`.
-* A weekly workflow cherry-picks every `merge-train`-labeled PR onto one branch and opens a
-  single aggregate PR (labeled `bulk-merge-pr`) against `master` for bulk review and merge. If a
-  PR fails to cherry-pick cleanly or stops being mergeable, it's dropped from that batch (label
-  removed, comment left) rather than blocking the others.
+* A weekly workflow cherry-picks every `merge-train`-labeled PR onto one branch, smallest PR
+  number first, and opens a single aggregate PR (labeled `bulk-merge-pr`) against `master` for
+  bulk review and merge. Picking smallest-number-first means an older PR can never be starved by
+  newer ones repeatedly filling the batch ahead of it. If a PR fails to cherry-pick cleanly or
+  stops being mergeable, it's dropped from that batch (label removed, comment left) rather than
+  blocking the others.
+* A PR older than `max_age_days` (`.github/merge-train-config.yml`, default 14 days, matching the
+  ~2-week release cadence) is excluded from auto-batching even if it's otherwise tiny/green/
+  non-GPU -- it needs a maintainer to look at why it's gone untouched this long rather than
+  silently riding into a batch.
 * Once the aggregate PR merges, every original PR it included is closed automatically -- without
   being merged itself, since its change already landed via the aggregate PR -- with a comment
   linking back to it.

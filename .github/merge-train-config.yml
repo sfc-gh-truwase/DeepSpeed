@@ -50,3 +50,10 @@ gpu_sensitive_paths:
 # If true, all of a PR's *required* status checks (gh pr checks --required)
 # must be successful for it to be eligible.
 required_checks_must_be_green: true
+
+# A PR older than this (by creation date) is excluded from auto-batching,
+# even if it's otherwise tiny/green/non-GPU -- it needs a maintainer to look
+# at why it's gone untouched this long rather than silently riding into a
+# batch. Set to match the ~2-week release cadence; raise it if that proves
+# too aggressive in practice.
+max_age_days: 14

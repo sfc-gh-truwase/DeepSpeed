@@ -7,7 +7,7 @@
 Usage: merge_train_eligibility.py PR_JSON_FILE CONFIG_FILE
 
 PR_JSON_FILE: output of
-  gh pr view <n> --json isDraft,mergeable,additions,deletions,changedFiles,files,labels
+  gh pr view <n> --json isDraft,mergeable,additions,deletions,changedFiles,files,labels,createdAt
 CONFIG_FILE: .github/merge-train-config.yml
 
 The required-checks-green condition is checked by the caller (it needs a
@@ -21,6 +21,7 @@ script error -- and prints exactly one of:
 import fnmatch
 import json
 import sys
+from datetime import datetime, timezone
 
 try:
     import yaml
@@ -34,6 +35,14 @@ def decide(pr, cfg):
         return "INELIGIBLE: draft PR"
     if pr.get("mergeable") == "CONFLICTING":
         return "INELIGIBLE: merge conflicts with base"
+
+    max_age_days = cfg.get("max_age_days")
+    created_at = pr.get("createdAt")
+    if max_age_days is not None and created_at:
+        created = datetime.fromisoformat(created_at.replace("Z", "+00:00"))
+        age_days = (datetime.now(timezone.utc) - created).days
+        if age_days > max_age_days:
+            return f"INELIGIBLE: {age_days} days old > max age {max_age_days} days"
 
     changed_lines = pr.get("additions", 0) + pr.get("deletions", 0)
     changed_files = pr.get("changedFiles", 0)

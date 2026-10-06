@@ -40,9 +40,11 @@ main() {
     git fetch origin master
     git checkout -B "$BRANCH" origin/master
 
+    # Cherry-pick smallest PR number first, so an older PR can never be
+    # starved by newer ones repeatedly filling the batch ahead of it.
     local candidates
     candidates=$(gh pr list --repo "$GITHUB_REPOSITORY" --label "$MERGE_TRAIN_LABEL" \
-        --state open --json number,title --jq '.[] | "\(.number)\t\(.title)"')
+        --state open --json number,title --jq 'sort_by(.number) | .[] | "\(.number)\t\(.title)"')
 
     if [ -z "$candidates" ]; then
         echo "no PRs currently labeled $MERGE_TRAIN_LABEL, nothing to batch"

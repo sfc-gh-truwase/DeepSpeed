@@ -54,7 +54,7 @@ process_pr() {
     local pr_number="$1"
     local pr_json
     pr_json=$(gh pr view "$pr_number" --repo "$GITHUB_REPOSITORY" \
-        --json isDraft,mergeable,additions,deletions,changedFiles,files,labels,body)
+        --json isDraft,mergeable,additions,deletions,changedFiles,files,labels,body,createdAt)
     echo "$pr_json" > "/tmp/pr-${pr_number}.json"
 
     local body
