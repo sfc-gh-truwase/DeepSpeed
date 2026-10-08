@@ -531,6 +531,63 @@ class DeepSpeedEngine(Module):
         if self.dist_backend is None:
             self.enable_backward_allreduce = False
 
+        self._configure_activation_checkpoint_cpu_offload()
+
+    def _configure_activation_checkpoint_cpu_offload(self):
+        """Honor ``activation_checkpointing.cpu_checkpointing`` for HF and native paths.
+
+        Native ``deepspeed.checkpointing.checkpoint`` still needs ``configure()``;
+        call it from ds_config when the user has not already. HuggingFace
+        non-reentrant checkpointing is wrapped across engine forward+backward.
+        """
+        self._activation_cpu_offload_ctx = None
+        self._activation_cpu_offload_entered = False
+        act_cfg = self._config.activation_checkpointing_config
+        if not act_cfg.cpu_checkpointing:
+            return
+
+        from deepspeed.runtime.activation_checkpointing import checkpointing as ds_ckpt
+        if not ds_ckpt.is_configured():
+            ds_ckpt.configure(self.mpu, deepspeed_config=self.config)
+
+        # Pipeline schedules forward/backward separately from engine.forward.
+        if self.pipeline_parallelism:
+            return
+
+        import importlib.util
+        if importlib.util.find_spec("transformers") is None:
+            return
+
+        from deepspeed.runtime.activation_checkpointing.offload_activations import get_checkpoint_hidden_states_offloading_ctx_manager
+
+        self._activation_cpu_offload_ctx = get_checkpoint_hidden_states_offloading_ctx_manager()
+        log_dist("Enabled activation checkpoint CPU offload (activation_checkpointing.cpu_checkpointing)", ranks=[0])
+
+    def _enter_activation_cpu_offload(self):
+        ctx = self._activation_cpu_offload_ctx
+        if ctx is None or self._activation_cpu_offload_entered:
+            return
+        if not self.training or not torch.is_grad_enabled():
+            return
+        if self.is_deepcompile_active():
+            return
+        from deepspeed.runtime.activation_checkpointing.offload_activations import _current_manager
+        # User already wrapped this step with CheckpointHiddenStatesOffload.
+        if _current_manager() is not None:
+            return
+        ctx.__enter__()
+        self._activation_cpu_offload_entered = True
+
+    def _exit_activation_cpu_offload(self):
+        if not getattr(self, "_activation_cpu_offload_entered", False):
+            return
+        self._activation_cpu_offload_entered = False
+        self._activation_cpu_offload_ctx.__exit__(None, None, None)
+
+    def _drain_native_activation_offload(self):
+        from deepspeed.runtime.activation_checkpointing.checkpointing import _drain_cpu_offload_engine
+        _drain_cpu_offload_engine()
+
     def _optimized_linear_offload_setup(self):
         self.optimized_linear_base_weight_sharding = False
         self.optimized_linear_lora_enabled = False
@@ -640,6 +697,13 @@ class DeepSpeedEngine(Module):
         if specs:
             validate_autoep_post_detection(autoep_config, specs)
             auto_ep.replace_moe_layers(specs, ep_size=ep_size, ep_rank=ep_rank)
+            # Engine __init__ snapshots param objects before AutoEP fold. Rebuild so the
+            # pre-fold full-expert Parameters are not pinned for the rest of training.
+            debug_clear_module_and_param_names()
+            debug_extract_module_and_param_names(model)
+            if get_accelerator().is_available():
+                gc.collect()
+                get_accelerator().empty_cache()
             logger.info(f"AutoEP: replaced {len(specs)} MoE layer(s) with ep_size={ep_size}")
 
             # Re-tag optimizer flags for newly created AutoEP parameters
@@ -883,6 +947,8 @@ class DeepSpeedEngine(Module):
         checkpoint_engine = getattr(self, "checkpoint_engine", None)
         if checkpoint_engine is not None and checkpoint_engine.is_decoupled():
             checkpoint_engine.cleanup()
+
+        self._exit_activation_cpu_offload()
 
     def _get_model_parameters(self):
         if self.autotuning_profile_model_info():
@@ -2821,8 +2887,15 @@ class DeepSpeedEngine(Module):
             # We can't have this in forward prologue as the compiler compiles hooks including the forward prologue.
             self.launch_compile_passes(self.global_steps)
 
-        with deepcompile_z3_forward_context(self) as z3_eager_fallback, autocast_if_enabled(self):
-            loss = self.module(*inputs, **kwargs)
+        # saved_tensors_hooks must stay active until backward unpacks.
+        self._enter_activation_cpu_offload()
+        try:
+            with deepcompile_z3_forward_context(self) as z3_eager_fallback, autocast_if_enabled(self):
+                loss = self.module(*inputs, **kwargs)
+        except Exception:
+            self._exit_activation_cpu_offload()
+            self._drain_native_activation_offload()
+            raise
 
         forward_graph_id = None
 
@@ -2992,6 +3065,7 @@ class DeepSpeedEngine(Module):
         see_memory_usage("Engine after backward", force=self.memory_breakdown())
         self._stop_timers(self.engine_timers.backward_reduce_timers)
         self._stop_timers(self.engine_timers.backward_timers)
+        self._exit_activation_cpu_offload()
 
     def _backward_prologue_per_tensor(self, grad):
         if is_functorch_transforming():
@@ -3243,20 +3317,27 @@ class DeepSpeedEngine(Module):
         elif self.torch_autocast_z0_gradscaler:
             loss = self.torch_autocast_z0_gradscaler.scale(loss)
 
-        with compiled_autograd(self._is_compiled_autograd_enabled, self._compile_kwargs):
-            if self.zero_optimization() or not self.amp_enabled():
-                loss.backward(**backward_kwargs)
-            elif self.amp_enabled():
-                # AMP requires delaying unscale when inside gradient accumulation boundaries
-                # https://nvidia.github.io/apex/advanced.html#gradient-accumulation-across-iterations
-                delay_unscale = not self.is_gradient_accumulation_boundary()
-                with amp.scale_loss(loss, self.optimizer, delay_unscale=delay_unscale) as scaled_loss:
-                    scaled_loss.backward(**backward_kwargs)
+        try:
+            with compiled_autograd(self._is_compiled_autograd_enabled, self._compile_kwargs):
+                if self.zero_optimization() or not self.amp_enabled():
+                    loss.backward(**backward_kwargs)
+                elif self.amp_enabled():
+                    # AMP requires delaying unscale when inside gradient accumulation boundaries
+                    # https://nvidia.github.io/apex/advanced.html#gradient-accumulation-across-iterations
+                    delay_unscale = not self.is_gradient_accumulation_boundary()
+                    with amp.scale_loss(loss, self.optimizer, delay_unscale=delay_unscale) as scaled_loss:
+                        scaled_loss.backward(**backward_kwargs)
 
-            # backward_epilogue is not called in a hook when self._support_torch_style_backward is False
-            self._backward_epilogue()
-
-        self._running_engine_backward = False
+                # backward_epilogue is not called in a hook when self._support_torch_style_backward is False
+                self._backward_epilogue()
+        except Exception:
+            # Failed backward must still drop saved_tensors_hooks; skip the rest of
+            # epilogue (allreduce / optimizer) because grads are incomplete.
+            self._exit_activation_cpu_offload()
+            raise
+        finally:
+            self._drain_native_activation_offload()
+            self._running_engine_backward = False
 
         return gas_scaled_loss
 

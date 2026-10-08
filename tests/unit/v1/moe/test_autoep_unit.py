@@ -17,7 +17,7 @@ import deepspeed.runtime.engine as ds_engine
 import deepspeed.runtime.zero.stage3 as zero_stage3
 import deepspeed.moe.ep_repack as ep_repack
 import deepspeed.module_inject.auto_ep_layer as auto_ep_layer
-from deepspeed.module_inject.auto_ep import AutoEP, _resolve_route_scale
+from deepspeed.module_inject.auto_ep import AutoEP, _release_copied_source_moe_params, _resolve_route_scale
 from deepspeed.module_inject.auto_ep_config import (
     AutoEPConfig,
     MoELayerSpec,
@@ -50,6 +50,7 @@ from deepspeed.runtime.zero.stage3 import DeepSpeedZeroOptimizer_Stage3
 from deepspeed.utils import groups
 from unit.v1.moe.autoep_test_utils import (
     MockMoEBlock,
+    MockMoEExperts,
     MockMoETransformer,
     UNSUPPORTED_LOAD_BALANCE_VALUES,
     assert_causal_lm_outputs_close,
@@ -1088,6 +1089,35 @@ class TestModelDetectionAndReplacement:
         _assert_same_dtype_device(replaced.experts.w1, source.experts.gate_up_proj)
         _assert_same_dtype_device(replaced.experts.w2, source.experts.down_proj)
         _assert_same_dtype_device(replaced.experts.w3, source.experts.gate_up_proj)
+
+    def test_replace_drops_pre_fold_expert_storage(self):
+        model = MockMoETransformer(num_layers=1, num_experts=8, moe_every_n=1)
+        source = model.model.layers[0].mlp
+        full_expert_numel = source.experts.gate_up_proj.numel() + source.experts.down_proj.numel()
+
+        auto_ep = AutoEP(model, _runtime_config(enabled=True, autoep_size=2, preset_model="mixtral"))
+        spec = auto_ep.ep_parser()[0]
+        auto_ep.replace_moe_layer(spec, ep_size=2, ep_rank=0)
+
+        replaced = model.model.layers[0].mlp
+        assert source.experts.gate_up_proj.numel() == 0
+        assert source.experts.down_proj.numel() == 0
+        local_expert_numel = replaced.experts.w1.numel() + replaced.experts.w2.numel() + replaced.experts.w3.numel()
+        assert local_expert_numel == full_expert_numel // 2
+
+    def test_release_keeps_shared_expert_storage(self):
+        source = nn.Module()
+        source.experts = MockMoEExperts(num_experts=4, ffn_hidden=16, hidden_size=8)
+        source.shared_expert = nn.Linear(8, 8, bias=False)
+        shared_ptr = source.shared_expert.weight.data_ptr()
+        spec = _make_spec(has_shared_experts=True, shared_experts_name="shared_expert")
+
+        _release_copied_source_moe_params(source, spec)
+
+        assert source.experts.gate_up_proj.numel() == 0
+        assert source.experts.down_proj.numel() == 0
+        assert source.shared_expert.weight.data_ptr() == shared_ptr
+        assert source.shared_expert.weight.numel() == 64
 
     def test_zero_init_source_gathered_for_parser_router_and_fused_repack(self, monkeypatch):
         FakeGatheredParameters.calls = []

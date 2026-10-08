@@ -77,6 +77,17 @@ def _get_autocast_dtype(device_type):
         return None
 
 
+def _zero_param_needs_gather(param):
+    return (param is not None and is_zero_param(param) and getattr(param.ds_status, "name", None) == "NOT_AVAILABLE")
+
+
+def zero3_gathered_param(param):
+    """All-gather a partitioned ZeRO-3 Parameter before a view/kernel uses it."""
+    if _zero_param_needs_gather(param):
+        param.all_gather()
+    return param
+
+
 class LinearFunctionForZeroStage3(torch.autograd.Function):
 
     generate_vmap_rule = True
@@ -84,17 +95,28 @@ class LinearFunctionForZeroStage3(torch.autograd.Function):
     @staticmethod
     # bias is an optional argument
     def forward(input, weight, bias=None):
-
-        if input.dim() == 2 and bias is not None:
-            # fused op is marginally faster
-            ret = torch.addmm(bias, input, weight.t())
-        else:
-            output = input.matmul(weight.t())
-            if bias is not None:
-                output += bias
-            ret = output
-
-        return ret
+        # Rematerialize may run Linear without a module pre-hook. Gather here
+        # so silu(gate(x))*up(x) cannot see an emptied intermediate_size dim.
+        gathered = []
+        if _zero_param_needs_gather(weight):
+            weight.all_gather()
+            gathered.append(weight)
+        if _zero_param_needs_gather(bias):
+            bias.all_gather()
+            gathered.append(bias)
+        try:
+            if input.dim() == 2 and bias is not None:
+                # fused op is marginally faster
+                ret = torch.addmm(bias, input, weight.t())
+            else:
+                output = input.matmul(weight.t())
+                if bias is not None:
+                    output += bias
+                ret = output
+            return ret
+        finally:
+            for param in gathered:
+                param.partition()
 
     @staticmethod
     def setup_context(ctx, inputs, output):
@@ -102,7 +124,14 @@ class LinearFunctionForZeroStage3(torch.autograd.Function):
         ctx._dtype = _get_autocast_dtype(device_type)
         ctx._fwd_used_autocast = _is_autocast_enabled(device_type)
         input, weight, bias = inputs[0], inputs[1], inputs[2] if len(inputs) > 2 else None
-        ctx.save_for_backward(input, weight, bias)
+        # Only the activation is checkpointed via save_for_backward. Parameters are
+        # stashed as live references instead: save_for_backward returns a plain
+        # snapshot that drops the ds_id and, under DeepSpeed activation-checkpoint
+        # recompute, can alias the parameter's partitioned (size-0) storage, so
+        # backward would neither recognize nor be able to re-gather the ZeRO-3 weight.
+        ctx.save_for_backward(input)
+        ctx.weight = weight
+        ctx.bias = bias
 
     # This function has only a single output, so it gets only one gradient
     @staticmethod
@@ -112,13 +141,18 @@ class LinearFunctionForZeroStage3(torch.autograd.Function):
         # when forward did not use it, to guard against outer autocast regions.
         device_type = get_accelerator().device_name()
         with torch.autocast(device_type=device_type, enabled=ctx._fwd_used_autocast, dtype=ctx._dtype):
-            input, weight, bias = ctx.saved_tensors
+            input, = ctx.saved_tensors
+            weight = ctx.weight
+            bias = ctx.bias
 
             grad_input = grad_weight = grad_bias = None
-            weight_was_partitioned = (is_zero_param(weight)
-                                      and getattr(weight.ds_status, "name", None) == "NOT_AVAILABLE")
-            if weight_was_partitioned:
+            gathered = []
+            if _zero_param_needs_gather(weight):
                 weight.all_gather()
+                gathered.append(weight)
+            if _zero_param_needs_gather(bias):
+                bias.all_gather()
+                gathered.append(bias)
 
             try:
                 dim = grad_output.dim()
@@ -141,12 +175,25 @@ class LinearFunctionForZeroStage3(torch.autograd.Function):
                         grad_bias = grad_output.sum(0)
                 return grad_input, grad_weight, grad_bias
             finally:
-                if weight_was_partitioned:
-                    weight.partition()
+                for param in gathered:
+                    # A trainable weight we just gathered still owes its gradient
+                    # to AccumulateGrad and ZeRO's grad-reduction hook, which run
+                    # after this backward returns and require the full-size param.
+                    # Partitioning it here would shrink it to numel 0 before
+                    # AccumulateGrad and corrupt the gradient; the reduction hook
+                    # releases it instead. Frozen params have no such hook, so we
+                    # free them ourselves.
+                    if not param.requires_grad:
+                        param.partition()
 
 
 def zero3_linear_wrap(input, weight, bias=None):
     return LinearFunctionForZeroStage3.apply(input, weight, bias)
+
+
+def zero3_linear_module_forward(self, input, *unused_args, **unused_kwargs):
+    # Catch nn.Linear.forward that calls aten::linear instead of F.linear.
+    return LinearFunctionForZeroStage3.apply(input, self.weight, self.bias)
 
 
 class LinearModuleForZeroStage3(Module):

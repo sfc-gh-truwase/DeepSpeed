@@ -82,6 +82,54 @@ def _raise_if_duplicate_moe_specs(specs: list[MoELayerSpec]) -> None:
                      "AutoEP patterns so each MoE module matches exactly one preset.")
 
 
+def _parameter_ids(module_or_param: nn.Module | nn.Parameter | None) -> set[int]:
+    ids: set[int] = set()
+    if module_or_param is None:
+        return ids
+    if isinstance(module_or_param, nn.Parameter):
+        ids.add(id(module_or_param))
+        return ids
+    if isinstance(module_or_param, nn.Module):
+        for param in module_or_param.parameters():
+            ids.add(id(param))
+    return ids
+
+
+def _drop_copied_parameter_storage(param: nn.Parameter) -> None:
+    """Free backing storage AutoEP already copied into GroupedExperts / the new router."""
+    param.grad = None
+    empty = torch.empty(0, dtype=param.dtype, device=param.device)
+    param.data = empty
+    ds_tensor = getattr(param, "ds_tensor", None)
+    if torch.is_tensor(ds_tensor):
+        param.ds_tensor = torch.empty(0, dtype=ds_tensor.dtype, device=ds_tensor.device)
+
+
+def _release_copied_source_moe_params(source_module: nn.Module, spec: MoELayerSpec) -> None:
+    """Drop pre-fold expert/router weights while keeping reused shared-expert modules.
+
+    AutoEP copies router and local expert tensors into the replacement layer. The original
+    MoE block is unhooked from the parent, but global debug maps and other accidental
+    references can keep the full expert replica resident. Shared experts are assigned by
+    reference, so their storage must not be dropped.
+    """
+    keep_ids: set[int] = set()
+    if spec.has_shared_experts and spec.shared_experts_name:
+        keep_ids |= _parameter_ids(getattr(source_module, spec.shared_experts_name, None))
+    if spec.shared_experts_gate_name:
+        keep_ids |= _parameter_ids(getattr(source_module, spec.shared_experts_gate_name, None))
+
+    released = 0
+    for param in source_module.parameters():
+        if id(param) in keep_ids or param.numel() == 0:
+            continue
+        _drop_copied_parameter_storage(param)
+        released += 1
+    if released:
+        logger.debug("AutoEP: dropped storage for %s copied source parameter(s) on '%s'", released,
+                     spec.moe_module_name)
+
+
 def _source_param_shape(param: torch.Tensor | nn.Parameter) -> torch.Size:
     if is_zero_param(param):
         return torch.Size(param.ds_shape)
@@ -513,6 +561,7 @@ class AutoEP:
 
         # Replace in-place on parent
         setattr(parent, child_name, replacement)
+        _release_copied_source_moe_params(source_module, spec)
         return replacement
 
     def _retarget_transformers_output_recorders(self, spec: MoELayerSpec, replacement: nn.Module) -> None:
