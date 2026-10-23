@@ -33,7 +33,7 @@ Subfolders + `common.py` (subprocess arms, `ARMRESULT` / `DRIVERRESULT`):
 |------|------|
 | `model_tensor_offload/bench.py` | Required e2e: ZeRO CPU offload pin on/off. `--zero-stage 3` default; `1`/`2` optimizer-only. Also now supports `--act-mem-opt`/`--tiled-mlp`/`--gradient-checkpointing` (ported from `activation_offload/bench.py`'s wiring into `common.py`, default off) — see "H200 model-tensor offload + act-mem-opt" below. |
 | `activation_offload/bench.py` | Activation checkpoint workload: `CheckpointHiddenStatesOffload`, `use_pin_memory` on/off, **`use_streams=True`**, HF `--model`, `--offload-optimizer --act-mem-opt`. |
-| `h2d_d2h/bench.py` | Supporting GB/s: pageable, torch, native-unregistered, native-registered. `--skip-native-register` on XPU |
+| `h2d_d2h/bench.py` | Supporting GB/s: pageable, torch, native-unregistered, native-registered. `--skip-native-register` on XPU. Requires DSE `48de051`+ (writes host buffers before timing; reports THP coverage). Follow §2a for every SKU. |
 | `grad_offload/bench.py` | Optional; execs model-tensor ZeRO-3 |
 | `cpu_pin/bench.py` | Optional CPU-only native vs Torch |
 | `deepcompile_activation/bench.py` | Optional `compile.offload_activation_pin_memory` |
@@ -71,7 +71,7 @@ H200 model-tensor used `deepspeed.zero.Init` (not the ~27 bytes/param no-Init pl
 
 1. Model-tensor: `python model_tensor_offload/bench.py --model Qwen/...` unpinned vs pinned on B70, H200, and Ascend 910B4 (GH200 optional). Synthetic `--hidden/--layers` is **smoke only**. B70: no `--ablate-register`. Ascend published model is Qwen3-4B.
 2. Activation checkpoint workload: `python activation_offload/bench.py --model Qwen/Qwen3-... --offload-optimizer --act-mem-opt` pageable vs pinned, async on. Pitch: **longest demonstrated sequence length**. If B70 cannot run the engine, **named limitation** (commit + error) — do not invent numbers; still run Qwen3 model-tensor + H2D/D2H on B70. Do not label synthetic bars as Qwen.
-3. H2D/D2H: `python h2d_d2h/bench.py` on H200, Ascend 910B4, and GH200; B70 with `--skip-native-register`. No HF model. Pageable vs pinned is the story; Torch vs native-registered is a CUDA parity inset. Ascend’s measured arm is native-registered vs pageable. Keep GH200 and Ascend off the H200 GB/s chart.
+3. H2D/D2H: `python h2d_d2h/bench.py` on H200, Ascend 910B4, and GH200; B70 with `--skip-native-register`. No HF model. Pageable vs pinned is the story; Torch vs native-registered is a CUDA parity inset. Ascend’s measured arm is native-registered vs pageable. Keep GH200 and Ascend off the H200 GB/s chart. **Follow §2a**: written host buffers (never `--no-touch`), NUMA-bound plus unbound runs, recorded THP mode and page backing; optional 4K-vs-2M page-size arms.
 4. Saved-activation offload (peer publish application; H200 is required, GH200 optional): `python saved_activation_offload/bench.py --model Qwen/Qwen3-8B --offload-optimizer --act-mem-opt --offload-tensors -1 --credits 1 --prefetch 2` on H200, pin T/F, seq 8K/16K/32K/64K (add `--discover-calib-seqs 4096 8192` at seq ≥32K). GH200 was measured at `N=2`; keep that label and do not copy the H200 ratio. ZeRO-2 CPU AdamW; pin toggles activation buffers and optimizer host buffers. Qwen3.5-9B is required (own chart). The script is accelerator-agnostic (DeepSpeed accelerator abstraction). B70 is required: Qwen3 (same ID as B70 model-tensor), batch 1, seq 2048, same flags, pin T/F; Qwen3.5-0.8B/2B own chart; named limitation (commit + error) only if it actually fails on XPU. Ascend 910B4 is required and collected (Qwen3-4B, batch 1, seq 2048, 1.14×). Full details in `SAVED_ACTIVATION_OFFLOAD_PLAN.md` §10.
 5. Ascend 910B4 (required, already measured): model-tensor Qwen3-4B batch 1 seq 1024 and seq 2048; activation checkpoint workload Qwen3-4B batch 1 seq 8192; H2D/D2H native-registered vs pageable at 256 MiB. Qwen3.5-4B model-tensor is collected.
 6. GH200 (`ds-pin-Xinyu-experiment.pdf`, `galleon` GPU0, node 0, Examples `5b16fe4`, October 2026): H2D/D2H, activation checkpoint, and saved-activation are measured. Model-tensor is not in the PDF; GH200 is optional so it does not block. Do not copy PCIe or H200 numbers. The PDF’s DeepNVMe figure is out of scope.
@@ -81,6 +81,112 @@ H200 model-tensor used `deepspeed.zero.Init` (not the ~27 bytes/param no-Init pl
 **Optional:** GB200, model-tensor `--zero-stage 1`/`2` (optimizer-only; distinct from the activation checkpoint workload), `grad_offload/`, `cpu_pin/`, `deepcompile_activation/`, model-tensor `--ablate-register`.
 
 **Out of scope:** NVMe, DataLoader pin, blog prose.
+
+---
+
+## 2a. Host-memory measurement guidance for a new SKU (first write, huge pages, NUMA)
+
+This section stands alone. Follow it on any accelerator (CUDA, XPU, Ascend NPU, C2C) before publishing a pin-vs-pageable number. It comes from the H200 study of 2026-10-23 (`job-20261023T131838Z`, `job-20261023T145721Z`; results in §6, “H200 host page size (transparent huge pages) and NUMA”). Use the H200 numbers only to compare against. Do not copy them onto another SKU's panel.
+
+### Why this matters
+
+1. **First write.** A host buffer that is allocated but never written is backed by the kernel's shared zero page. A pageable H2D copy from it reads that one page over and over and looks far faster than real data. On H200, 256 MiB pageable H2D measured 20.8 GB/s untouched vs 10.1 GB/s written, so the published pin speedup was 2.7x when the true value is 5.5x. D2H writes the host buffer, so it is not affected.
+2. **Host page size.** Pageable copy cost can depend on whether host pages are 4 KiB or 2 MiB (transparent huge pages, THP). On Ascend 910B4, 4K pages give ~6.4 GB/s and 2M pages ~23 GB/s, close to pinned (microbench). On H200 there is no bandwidth effect, because CUDA stages pageable copies through a driver buffer. In e2e training on H200, 2M pages mostly removed slow outlier steps from the pageable arm: average −7% to −16%, typical (min) step −0% to −5%. Pin speedup by min step did not change. Every SKU must be measured; the effect does not transfer between SKUs.
+3. **NUMA.** A host buffer on a NUMA node remote from the device can cost a lot: Ascend lost 26% on pinned D2H, H200 at most 6%. Record which node you used.
+
+### Required setup
+
+- **Harness version.** `deepspeedai/DeepSpeedExamples`-layout clone at `sfc-gh-truwase/DeepSpeedExamples`, branch `tjruwase/pin-memory-experiments`, commit **`48de051` or later**. Check with `python benchmarks/pin_memory/h2d_d2h/bench.py --help | grep -- --no-touch`. If the flag is missing, the bench predates the first-write fix, and its pageable H2D numbers are not publishable.
+- **Record the host environment** alongside every result:
+  ```bash
+  cat /sys/kernel/mm/transparent_hugepage/enabled /sys/kernel/mm/transparent_hugepage/defrag
+  touch /sys/kernel/mm/transparent_hugepage/enabled 2>&1   # read-only in most pods
+  uname -r; ldd --version | head -1; ulimit -l; numactl -H | head -4
+  python -c "import torch; print(torch.__version__)"
+  ```
+  Also record the driver/runtime version, the device-to-NUMA mapping, and the host link (PCIe gen/width or C2C). For the NUMA mapping, read `cat /sys/bus/pci/devices/<device-BDF>/numa_node` on any accelerator; on CUDA, `nvidia-smi topo -m` also works.
+
+### Rule 1 — write host buffers before timing (always)
+
+- `h2d_d2h/bench.py` does this by default from `48de051`. Every result row has `"touched": true`.
+- **Never publish a run made with `--no-touch`.** That flag only exists to reproduce the old artifact for comparison.
+- In any custom script, `fill_()` (or otherwise write) every host buffer before the first timed copy.
+- **Re-check old numbers.** Pageable H2D on this SKU measured with a bench older than `48de051` must be re-measured or confirmed to have used a written buffer. A pageable H2D that comes out higher than pageable D2H at large sizes is a warning sign; on H200 the artifact showed exactly that pattern.
+
+### Rule 2 — bind to the device's NUMA node, and report it
+
+- Microbench: run with `numactl --cpunodebind=<N> --membind=<N>`, where `<N>` is the device's node. Also run once unbound, so the number is comparable to unbound history.
+- E2E: match how the published rows were run. If the published rows were unbound, run unbound and record the node the allocations landed on. Do not mix bound and unbound numbers in one chart.
+
+### Rule 3 — page-size conditions (if you measure huge pages)
+
+Measure two conditions in a 2x2 design (page size x pin), back to back in the same job:
+
+| condition | how to request it |
+|---|---|
+| `4k` (default) | nothing; confirm THP is `madvise` or `never`, so ordinary allocations land on 4K pages |
+| `2m` | `THP_MEM_ALLOC_ENABLE=1 GLIBC_TUNABLES=glibc.malloc.hugetlb=1` in the environment of every process, both driver and arms |
+
+Each host allocation path has its own switch:
+
+| allocation path | used by | made 2M by |
+|---|---|---|
+| PyTorch CPU tensors (`torch.empty`/`zeros`, c10 `alloc_cpu`) | pageable arms; ZeRO and offload host buffers | `THP_MEM_ALLOC_ENABLE=1` (check that your torch supports it: `grep -c THP_MEM_ALLOC_ENABLE $(python -c 'import torch,os;print(os.path.dirname(torch.__file__))')/lib/libc10.so` must be ≥1) |
+| DeepSpeed native pin (DeepNVMe `posix_memalign`) | native pinned arms | `GLIBC_TUNABLES=glibc.malloc.hugetlb=1` (glibc ≥ 2.35) |
+| Accelerator-runtime pinned alloc (`cudaHostAlloc`, `torch.Tensor.pin_memory()`) | `torch` arm of `h2d_d2h` | nothing changes it; it is the control (expect 0%) |
+
+- **Always set both variables for `2m`.** If only the PyTorch path gets 2M pages, the pageable arm also gains CPU-side speed (fewer TLB misses and page faults), and that gain would be misread as a transfer effect.
+- If `/sys/kernel/mm/transparent_hugepage/enabled` is writable and you have root, `always` is an alternative. Record which method you used.
+- Do not use hugetlbfs (`MAP_HUGETLB`, `HugePages_Total`) for this; the Ascend result and this method use THP.
+
+### Rule 4 — verify the page backing; a null result is meaningless otherwise
+
+- **Microbench:** each `h2d_d2h` result row reports `host_thp_fraction_before`, `host_thp_fraction_after`, `thp_mem_alloc_enable`, and `glibc_tunables`. Accept the run only if the pageable and native arms show ≥0.90 at `2m` and ≈0 at `4k`. Sizes below 2 MiB cannot be fully THP-backed; report them, but do not gate on them.
+- **E2E:** sample every arm process during the run. Read `Anonymous` and `AnonHugePages` from `/proc/<pid>/smaps_rollup`, and `minflt`/`majflt` from fields 10/12 of `/proc/<pid>/stat`, every 5 s. Accept `2m` only if `AnonHugePages / Anonymous` ≥ 0.90 for the arm processes.
+- The H200 study's helper scripts do exactly this. They live in `autorun/hugepage/` of the `sfc_ds_pin_memory` workspace, not in the DSE repo; copy them or reimplement them:
+  - `thp_probe.py`: per-allocation-path coverage gate.
+  - `thp_sampler.py`: per-process coverage and fault sampler for e2e.
+  - `overlap_probe.py`: copy concurrent with a GEMM. It uses `torch.cuda` directly; port it to `get_accelerator()` streams and events on non-CUDA devices.
+
+### Rule 5 — e2e timing hygiene
+
+- Use `--steps 10` or more (the activation and model-tensor benches default to 4, which is too noisy for a few-percent effect).
+- Repeat each condition at least twice, interleaving `4k`/`2m`.
+- **Report both average and minimum step time per arm.** On H200 the 2M effect was almost entirely in the gap between average and minimum, i.e. it removed slow outlier steps; reporting only the average overstated it.
+- Report pin speedup within each page condition. Never compare pageable at 2M against pinned at 4K.
+
+### Commands (adapt model, sizes, and NUMA node to the SKU)
+
+```bash
+B=DeepSpeedExamples/benchmarks/pin_memory
+N=<device NUMA node>
+# microbench, 3 reps, interleaved; add --skip-native-register on XPU
+for rep in 1 2 3; do for c in 4k 2m; do
+  E="THP_CONDITION=$c"; [ $c = 2m ] && E="$E THP_MEM_ALLOC_ENABLE=1 GLIBC_TUNABLES=glibc.malloc.hugetlb=1"
+  env $E numactl --cpunodebind=$N --membind=$N python $B/h2d_d2h/bench.py --sizes-mib 4 64 256 1024
+  env $E python $B/h2d_d2h/bench.py --sizes-mib 4 64 256 1024          # unbound
+done; done
+# e2e example (published SKU shape, e.g. Ascend Qwen3-4B), each condition twice, interleaved
+env $E python $B/model_tensor_offload/bench.py --model Qwen/Qwen3-4B --batch 1 --seq 2048 --zero-stage 3 --steps 10
+```
+
+### What to report per SKU
+
+| field | example |
+|---|---|
+| SKU, host CPU, link | Ascend 910B4, Kunpeng-920, PCIe Gen4 x16 |
+| THP mode, `/sys` writable, kernel, glibc, torch, runtime | `madvise`, no, 6.x, 2.39, 2.14.0, CANN x.y |
+| harness commit, `touched` | `48de051`, true |
+| NUMA node used, bound/unbound | node 0, bound |
+| per arm x size x condition: H2D/D2H GB/s (median and min-max of reps), `host_thp_fraction` | pageable 256 MiB 4k: 6.4 / …, 0.0 |
+| e2e per arm x condition: avg and min step, pin speedup, THP coverage, minflt | … |
+
+### How to read the result
+
+- **2M pageable bandwidth within ~10% of 4K pageable:** page size does not matter for this SKU's DMA path (the H200 outcome).
+- **2M pageable reaches ≥70% of pinned:** the SKU's pageable path is page-count bound (the Ascend outcome). Run e2e before claiming anything; the microbench alone does not show a training benefit.
+- **Pinned arms move between 4K and 2M:** the effect is CPU-side, not transfer. Say so; do not credit it to DMA.
+- **Huge pages are never presented as a replacement for pinning** unless e2e pin speedup at 2M is within noise of 1.0x on that SKU.
 
 ---
 
@@ -106,7 +212,8 @@ Stale RTD (`docs/code-docs/source/memory.rst` still describing native as mlock-o
 
 ## 5. Rules
 
-- Commits: `--signoff`. Push DSE to **`sfc-gh-truwase`**, PR against `deepspeedai/DeepSpeedExamples`.
+- Commits: `--signoff`. Push DSE to **`sfc-gh-truwase`**. **No PRs or pushes to `deepspeedai/*` until the blog is completed** (owner instruction, 2026-10-23).
+- Host-memory measurements follow §2a: written buffers, NUMA recorded, THP backing verified.
 - Do not update `git config`.
 - Do not commit the nested clone into the DeepSpeed repo (`/DeepSpeedExamples/` is gitignored).
 
