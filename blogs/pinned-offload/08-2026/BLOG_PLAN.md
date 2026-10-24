@@ -285,6 +285,7 @@ Writer constraints for this script:
 - Pin vs non-pin wall time for **saved-activation** on H200, Qwen3-8B, `N=1`, `--offload-tensors -1`, seq 8K/16K/32K/64K (3.08× / 4.24× / 4.36× / 3.80×), and on GH200 Qwen3-8B, batch 1, seq 8K/16K/32K, K=-1, N=2 (1.14× / 1.13× / 1.17×). B60: required, numbers pending. Ascend: Qwen3-4B, batch 1, seq 2048, 1.14× (9.48→8.34 s). Qwen3.5 is required, own chart.
 - Ascend H2D/D2H: native-registered vs pageable at 256 MiB. GH200 H2D/D2H: four arms at 4/64/256 MiB, own panel. At 256 MiB, pageable and native-registered are within 4%. At 4 MiB, pinned is 1.3–1.5×.
 - Do not present synthetic MLP as a Qwen result.
+- **NUMA-balancing methodology (H200, `job-20261024T022512Z`):** on hosts with `kernel.numa_balancing=1`, published e2e rows must be run under `numactl --membind=all` or footnoted. At 4K pages, balancing causes 1.6-6.8M minor faults per step, in both arms. It adds jitter (ACT pinned max 5.12 vs 4.70 s bound) and shifts averages (MT pinned 4.06 vs 3.78 s). Pin speedup stays ~1.9x ACT / ~3.1x MT either way, so the headline holds; the absolute times and error bars change. Check whether the existing H200 rows were run unbound.
 - Activation checkpoint workload: pin vs pageable **with async on**, `--offload-optimizer --act-mem-opt`. The pin arm moves the activation pool and the optimizer host buffers together. Do not claim pin from #8282 async-vs-blocking.
 - On CUDA, native **with** register matches Torch H2D/D2H; native **without** register stays pageable-class (cite or remeasure #8283).
 - Pin makes copies **eligible** for overlap; do **not** claim “usable vs stalled” or a relative win until measured (including PCIe).
@@ -323,6 +324,7 @@ Headings stay **accelerator-neutral**. No “ZeRO” and no PR numbers in H2/H3 
 ### Independent knobs: offload pin_memory vs use_pin_memory
 ### Backend and device register
 ### When to disable pin (memlock, host RAM, C2C)
+### Host memory placement: NUMA node, automatic NUMA balancing, page size
 ## Conclusion
 ## Contributors
 ```
@@ -336,8 +338,14 @@ Headings stay **accelerator-neutral**. No “ZeRO” and no PR numbers in H2/H3 
 - **Observability:** DeepSpeed-managed pin is not `torch.is_pinned()`. Report both on CUDA.
 - **Numbers:** H200 / #8283 under supporting microbench; H200 / #8282 async vs blocking under the activation checkpoint workload as an overlap inset. New pin on/off numbers for that workload are the activation eval. Ascend 910B4 numbers stay on the Ascend panel. GH200 numbers stay on the GH200 panel. Qwen3 vs Qwen3.5 never share an unlabeled chart.
 - **hipHostRegister / IPEX** are not DeepSpeed #8283 APIs.
-- **Host page size (huge pages), under “When to disable pin”:** do not present 2M pages as an alternative to pinning. H200 (measured, `job-20261023T131838Z`): 2M pages leave pageable and pinned DMA bandwidth unchanged (CUDA stages pageable copies). They cut minor page faults ~170× and mostly remove slow outlier steps from the pageable e2e arm: average −7% to −16%, typical (min) step −0% to −5%. Pinned moves −2% to −3%. By min step the pin speedup is unchanged (model-tensor 2.72× → 2.75×, activation checkpoint 1.68–1.71× → 1.74×), so pinning still wins. Ascend 910B4: 2M pages bring pageable H2D near pinned in the microbench only; e2e is unmeasured. At most: if memlock forbids pinning, 2M-backed host buffers recover some pageable cost, which is large on Ascend's DMA path and small on CUDA.
+- **Host page size (huge pages), under “Host memory placement”:** do not present 2M pages as an alternative to pinning. *(2026-10-24 update: the outlier steps that 2M pages removed were automatic NUMA balancing, see the NUMA-balancing note below. `numactl --membind=all` removes them on 4K pages too. The apparent ACT pageable 2M gain (~1.2 s/step) was NUMA placement (`job-20261024T032725Z`): with placement fixed, 2M is worth ≤1.6%. Remote host memory costs +1.1-1.5 s/step, in the CPU Adam step. Message: page size is a non-factor on H200; placement is the factor. Pinned copies are less placement-sensitive than pageable ones, which is itself a pinning argument.)* H200 (measured, `job-20261023T131838Z`): 2M pages leave pageable and pinned DMA bandwidth unchanged (CUDA stages pageable copies). They cut minor page faults ~170× and mostly remove slow outlier steps from the pageable e2e arm: average −7% to −16%, typical (min) step −0% to −5%. Pinned moves −2% to −3%. By min step the pin speedup is unchanged (model-tensor 2.72× → 2.75×, activation checkpoint 1.68–1.71× → 1.74×), so pinning still wins. Ascend 910B4: 2M pages bring pageable H2D near pinned in the microbench only; e2e is unmeasured. At most: if memlock forbids pinning, 2M-backed host buffers recover some pageable cost, which is large on Ascend's DMA path and small on CUDA.
 - **NUMA, under Best practices:** bind the process to the accelerator's NUMA node. Ascend: a remote node costs pinned D2H ~26%. H200: ≤6%. Measure per platform; do not port the number.
+- **Automatic NUMA balancing, under “Host memory placement” (practitioner tip, H200 measured):**
+  - With `kernel.numa_balancing=1`, the kernel samples and migrates the pages of every large host buffer each step. Pinning offload buffers does not prevent this: DeepSpeed's CPU Adam state is ordinary pageable memory.
+  - On H200 (Qwen3-8B, 4K pages) it cost 1.6-6.8M minor faults and 10-70 CPU-s of kernel time per step, in both pinned and pageable runs.
+  - Launching under `numactl --membind=all` (all nodes allowed, balancing off for the process) removed all of it. It made ZeRO-3 model-tensor offload 5-7% faster (pinned 4.06 -> 3.78 s/step) and removed step-time jitter from activation offload.
+  - Tip: launch single-accelerator CPU-offload training under `numactl --cpunodebind=<accelerator node> --preferred=<accelerator node>`. This keeps CPU Adam and the staged pageable copies next to the device and also turns NUMA balancing off. For multi-rank runs, bind each rank to its own device's node. H200, ACT pageable: local 7.16 s/step vs CPU-remote 10.46 s vs unrestricted 7.38-8.82 s (`job-20261024T114211Z`, `032725Z`). Pinned is less sensitive: 4.22 vs 5.51 s.
+  - Show a small chart: faults/step and step time, 4K vs 4K+bind, pinned arm.
 
 ---
 

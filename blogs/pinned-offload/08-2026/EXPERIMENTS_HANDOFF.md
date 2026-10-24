@@ -86,13 +86,14 @@ H200 model-tensor used `deepspeed.zero.Init` (not the ~27 bytes/param no-Init pl
 
 ## 2a. Host-memory measurement guidance for a new SKU (first write, huge pages, NUMA)
 
-This section stands alone. Follow it on any accelerator (CUDA, XPU, Ascend NPU, C2C) before publishing a pin-vs-pageable number. It comes from the H200 study of 2026-10-23 (`job-20261023T131838Z`, `job-20261023T145721Z`; results in §6, “H200 host page size (transparent huge pages) and NUMA”). Use the H200 numbers only to compare against. Do not copy them onto another SKU's panel.
+This section stands alone. Follow it on any accelerator (CUDA, XPU, Ascend NPU, C2C) before publishing a pin-vs-pageable number. It comes from the H200 study of 2026-10-23/24 (`job-20261023T131838Z`, `job-20261023T145721Z`, `job-20261023T221332Z`, `job-20261024T022512Z`; results in §6, “H200 host page size (transparent huge pages) and NUMA” and “H200 automatic NUMA balancing”). Use the H200 numbers only to compare against. Do not copy them onto another SKU's panel.
 
 ### Why this matters
 
 1. **First write.** A host buffer that is allocated but never written is backed by the kernel's shared zero page. A pageable H2D copy from it reads that one page over and over and looks far faster than real data. On H200, 256 MiB pageable H2D measured 20.8 GB/s untouched vs 10.1 GB/s written, so the published pin speedup was 2.7x when the true value is 5.5x. D2H writes the host buffer, so it is not affected.
-2. **Host page size.** Pageable copy cost can depend on whether host pages are 4 KiB or 2 MiB (transparent huge pages, THP). On Ascend 910B4, 4K pages give ~6.4 GB/s and 2M pages ~23 GB/s, close to pinned (microbench). On H200 there is no bandwidth effect, because CUDA stages pageable copies through a driver buffer. In e2e training on H200, 2M pages mostly removed slow outlier steps from the pageable arm: average −7% to −16%, typical (min) step −0% to −5%. Pin speedup by min step did not change. Every SKU must be measured; the effect does not transfer between SKUs.
-3. **NUMA.** A host buffer on a NUMA node remote from the device can cost a lot: Ascend lost 26% on pinned D2H, H200 at most 6%. Record which node you used.
+2. **Host page size.** Pageable copy cost can depend on whether host pages are 4 KiB or 2 MiB (transparent huge pages, THP). On Ascend 910B4, 4K pages give ~6.4 GB/s and 2M pages ~23 GB/s, close to pinned (microbench). On H200 there is no bandwidth effect, because CUDA stages pageable copies through a driver buffer. In e2e training on H200, 2M pages mostly removed slow outlier steps. Those outliers turned out to be automatic NUMA balancing (item 4), which 2M pages make ~500x cheaper. Separately, the activation checkpoint pageable arm keeps a ~1.3-1.5 s backward-phase gain at 2M that is not fault-related (open, §6). Every SKU must be measured; the effect does not transfer between SKUs. Every SKU must be measured; the effect does not transfer between SKUs.
+3. **NUMA placement.** A host buffer on a NUMA node remote from the device can cost a lot: Ascend lost 26% on pinned D2H, H200 at most 6%. Record which node you used.
+4. **Automatic NUMA balancing (`kernel.numa_balancing=1`).** On multi-socket hosts the kernel periodically unmaps the pages of long-lived host buffers to sample access, then migrates them. Each re-touch is a minor "hinting" fault. On H200 at 4K pages this was **all** of the steady-state minor faults: 1.6-6.8M per step, in both pinned and pageable arms, in backward and in the CPU Adam step, with 10-70 CPU-s of sys time per step. It makes step times noisy and can shift results by several percent. The DeepSpeed CPU Adam state (`exp_avg`/`exp_avg_sq`, `torch.zeros_like` on CPU) is pageable in **both** arms, so it is hit even when offload buffers are pinned. Opt out per process with `numactl --membind=all` (Rule 2).
 
 ### Required setup
 
@@ -102,6 +103,7 @@ This section stands alone. Follow it on any accelerator (CUDA, XPU, Ascend NPU, 
   cat /sys/kernel/mm/transparent_hugepage/enabled /sys/kernel/mm/transparent_hugepage/defrag
   touch /sys/kernel/mm/transparent_hugepage/enabled 2>&1   # read-only in most pods
   uname -r; ldd --version | head -1; ulimit -l; numactl -H | head -4
+  cat /proc/sys/kernel/numa_balancing                       # 1 = automatic NUMA balancing on
   python -c "import torch; print(torch.__version__)"
   ```
   Also record the driver/runtime version, the device-to-NUMA mapping, and the host link (PCIe gen/width or C2C). For the NUMA mapping, read `cat /sys/bus/pci/devices/<device-BDF>/numa_node` on any accelerator; on CUDA, `nvidia-smi topo -m` also works.
@@ -117,6 +119,7 @@ This section stands alone. Follow it on any accelerator (CUDA, XPU, Ascend NPU, 
 
 - Microbench: run with `numactl --cpunodebind=<N> --membind=<N>`, where `<N>` is the device's node. Also run once unbound, so the number is comparable to unbound history.
 - E2E: match how the published rows were run. If the published rows were unbound, run unbound and record the node the allocations landed on. Do not mix bound and unbound numbers in one chart.
+- E2E: run under `numactl --cpunodebind=<dev node> --preferred=<dev node>`. The cuda `run.sh` scripts do this from DSE `31db0b7`; npu needs `NUMA_NODE=<n>`; `NUMA_BIND=0` opts out. Any explicit task policy (bind or preferred) also opts the process out of NUMA balancing. On H200, CPU threads or memory on the node remote from the GPU cost 1.1-3.3 s/step on activation checkpoint offload. `numactl --membind=all` disables balancing but leaves placement to the scheduler, which swung the same command between 7.38 and 8.82 s/step; use it only when the device node is unknown. Arm subprocesses inherit it; check that `/proc/<arm pid>/numa_maps` shows `bind:`. Report which mode you used. If you also want the balancing-on number, run both, back to back.
 
 ### Rule 3 — page-size conditions (if you measure huge pages)
 
@@ -154,6 +157,7 @@ Each host allocation path has its own switch:
 - Repeat each condition at least twice, interleaving `4k`/`2m`.
 - **Report both average and minimum step time per arm.** On H200 the 2M effect was almost entirely in the gap between average and minimum, i.e. it removed slow outlier steps; reporting only the average overstated it.
 - Report pin speedup within each page condition. Never compare pageable at 2M against pinned at 4K.
+- To attribute a step-time difference, set `PIN_BENCH_STEP_PROBE=<dir>` (DSE `152e17c`). Per step and per phase (fwd/bwd/opt/sync) it logs wall time, minor faults, user/sys CPU, faults by thread name, and host `numa_hint_faults`/`numa_pages_migrated`. Summarize with `autorun/hugepage/analyze_steps.py`. If per-step faults ≈ `numa_hint_faults + numa_pages_migrated`, the noise is NUMA balancing; rerun bound.
 
 ### Commands (adapt model, sizes, and NUMA node to the SKU)
 
@@ -167,7 +171,7 @@ for rep in 1 2 3; do for c in 4k 2m; do
   env $E python $B/h2d_d2h/bench.py --sizes-mib 4 64 256 1024          # unbound
 done; done
 # e2e example (published SKU shape, e.g. Ascend Qwen3-4B), each condition twice, interleaved
-env $E python $B/model_tensor_offload/bench.py --model Qwen/Qwen3-4B --batch 1 --seq 2048 --zero-stage 3 --steps 10
+env $E numactl --cpunodebind=$N --preferred=$N python $B/model_tensor_offload/bench.py --model Qwen/Qwen3-4B --batch 1 --seq 2048 --zero-stage 3 --steps 10
 ```
 
 ### What to report per SKU
@@ -178,6 +182,7 @@ env $E python $B/model_tensor_offload/bench.py --model Qwen/Qwen3-4B --batch 1 -
 | THP mode, `/sys` writable, kernel, glibc, torch, runtime | `madvise`, no, 6.x, 2.39, 2.14.0, CANN x.y |
 | harness commit, `touched` | `48de051`, true |
 | NUMA node used, bound/unbound | node 0, bound |
+| `numa_balancing`, e2e launch policy | 1, `--cpunodebind=0 --preferred=0` |
 | per arm x size x condition: H2D/D2H GB/s (median and min-max of reps), `host_thp_fraction` | pageable 256 MiB 4k: 6.4 / …, 0.0 |
 | e2e per arm x condition: avg and min step, pin speedup, THP coverage, minflt | … |
 
@@ -420,13 +425,67 @@ Microbench bandwidth did not move, so the pageable e2e gain is CPU-side, not DMA
 | activation checkpoint s8192, rep 2 | 8.68 -> 7.66 s (-11.8%) | 7.64 -> 7.57 s (-0.9%) | 4.47 -> 4.34 s (-2.8%) | 1.71x -> 1.74x |
 | model-tensor s4096 | 11.62 -> 10.84 s (-6.7%) | 10.79 -> 10.67 s (-1.1%) | 3.97 -> 3.88 s (-2.4%) | 2.72x -> 2.75x |
 
-The avg-minus-min gap on the pageable arm is about 1-1.5 s at 4K and about 0.1 s at 2M. Page faults drop about 170x: 88-103M minor faults per arm run at 4K (~580k/s steady) vs 0.5-0.8M at 2M (0.5-1.4k/s). There are no major faults. At 4K, **both arms fault at the same rate** (activation checkpoint pageable 584k/s, pinned 583k/s), so fault count alone does not explain why only the pageable arm benefits. Hypothesis, untested: pageable copies run synchronously on the issuing host thread (overlap probe below), so fault-handling contention lands on the step's critical path; pinned copies are already off the host thread. The first job's model-tensor min step did drop 5.5% (11.14 -> 10.53 s), so put the steady-state pageable gain at 0-5%, with most of the average gain coming from removed outlier steps. **Bottom line:** huge pages make pageable step times steadier and trim 0-5% off the typical step. They do not substitute for pinning: pin speedup by min step is unchanged or slightly higher at 2M (2.75x model-tensor, 1.74x activation checkpoint).
+The avg-minus-min gap on the pageable arm is about 1-1.5 s at 4K and about 0.1 s at 2M. Page faults drop about 170x: 88-103M minor faults per arm run at 4K (~580k/s steady) vs 0.5-0.8M at 2M (0.5-1.4k/s). There are no major faults. At 4K, **both arms fault at the same rate** (activation checkpoint pageable 584k/s, pinned 583k/s), so fault count alone does not explain why only the pageable arm benefits. *(Superseded 2026-10-24: the faults are automatic NUMA balancing, in both arms. See “H200 automatic NUMA balancing” below.)* The first job's model-tensor min step did drop 5.5% (11.14 -> 10.53 s), so put the steady-state pageable gain at 0-5%, with most of the average gain coming from removed outlier steps. **Bottom line:** huge pages make pageable step times steadier and trim 0-5% off the typical step. They do not substitute for pinning: pin speedup by min step is unchanged or slightly higher at 2M (2.75x model-tensor, 1.74x activation checkpoint).
 
 **Overlap probe (256 MiB H2D with a ~10.9 ms GEMM on another stream, NUMA-bound):** a pageable `copy_(non_blocking=True)` blocks the issuing thread for the whole copy (27.9 ms issue = 27.9 ms wall, ~9.6 GB/s). Its bandwidth does not drop under concurrent compute, unlike B60. Native-registered issues in 0.017 ms and fully overlaps (11.25 ms total, about the same as the GEMM alone). 2M pages change neither arm.
 
 **NUMA:** H200 GPU0 is on node 0. Binding to it gains 2-6% on pageable D2H and at most 2% on pinned D2H at 1 GiB, far smaller than Ascend's 26% pinned-D2H loss when remote.
 
 **Cross-SKU caveat:** any H2D/D2H number from a bench version that did not write the pageable buffer before timing is suspect (zero-page reads). Ask the Ascend, B60, and GH200 owners whether their pageable H2D arms wrote the buffer first. Ascend's 6.48 GB/s and the GH200 PDF numbers are unconfirmed on this point.
+
+### H200 automatic NUMA balancing — root cause of the 4K fault storm and step jitter (2026-10-24)
+
+**Setup.** The H200 nodes run `kernel.numa_balancing=1` on 2 NUMA nodes (Xeon 8488C, 192 CPUs, ~1 TB per node; GPU0-3 on node 0, GPU4-7 on node 1). Probe: DSE `152e17c` `StepProbe`. Jobs: `job-20261023T221332Z` (per-phase attribution) and `job-20261024T022512Z` (confirmation, on a new host after a node recycle). Script: `autorun/hugepage/hugepage_numa_job.sh`. Workloads: Qwen3-8B, activation checkpoint (ACT) bs1 x seq 8192 and model-tensor (MT) ZeRO-3 bs1 x seq 4096, steps 10.
+
+**Attribution (`221332Z`).** At 4K, faults land in two places:
+- The **optimizer step, in both arms**: 0.3-7M faults/step and 10-70 CPU-s of sys time across the CPU Adam threads. This is all of the pinned arm's 4K penalty. MT pinned steps with no optimizer-step faults ran 3.91-3.98 s, the same as at 2M.
+- The **backward phase, in the pageable arm only**: 1-1.7M faults/step, partly on `pt_autograd_0`.
+
+The fault pattern drifts over a run, so 4K->2M min-step deltas vary from run to run.
+
+**Confirmation (`022512Z`).** Steady-state minor faults per step equal the host-wide `numa_hint_faults + numa_pages_migrated` to within 0.01M:
+
+| arm (4K) | faults/step | hint + migrated |
+|---|---|---|
+| ACT pageable | 1.99M | 1.72 + 0.26 |
+| ACT pinned | 1.90M | 1.60 + 0.30 |
+| MT unpinned | 6.81M | 6.12 + 0.69 |
+| MT pinned | 1.63M | 1.39 + 0.23 |
+
+Under `numactl --membind=all`, every arm has 0 faults/step and ~0 sys time. The policy was verified as `bind:0-1` in the arm subprocess. So the "pageable-only backward faults" above are hinting faults too, not freshly allocated copy destinations. DeepSpeed is not re-allocating; the kernel samples and migrates long-lived buffers (including the ~61 GiB of pageable CPU Adam state).
+
+**Step time, avg / min (s), same host and job:**
+
+| | 4K | 4K + `--membind=all` | 2M |
+|---|---|---|---|
+| MT unpinned | 12.828 / 11.610 | **11.870 / 11.166** | 12.343 / 11.628 |
+| MT pinned | 4.062 / 3.851 | **3.781 / 3.699** | 3.999 / 3.896 |
+| ACT pageable | 8.881 / 8.462 | 8.813 / 8.779 | **7.636 / 7.417** |
+| ACT pinned | 4.661 / 4.394 | 4.673 / 4.626 | **4.513 / 4.460** |
+
+- MT: binding is the best condition for both arms; pinned is 7% faster than 4K and 5% faster than 2M.
+- ACT: binding leaves the average unchanged but removes the variance. Pinned max goes 5.12 -> 4.70 s; pageable spread goes from 8.46-9.61 s to 8.78-8.84 s.
+- Pin speedup is stable across conditions: ACT ~1.9x, MT ~3.1x. Under binding, average ≈ min.
+- One rep per condition, on a different host from the 2026-10-23 jobs (MT unpinned is slower here in every condition). Do not compare absolute times across these jobs.
+
+**Resolved (`job-20261024T032725Z`, `autorun/hugepage/hugepage_act2m_job.sh`): the ACT "2M gain" was NUMA placement, not page size.** ACT Qwen3-8B s8192, page size x placement, balancing off in all conditions. Placement was verified per arm from `/proc/<pid>/numa_maps` (sampler `THP_SAMPLER_NUMA_EVERY=6`). Avg step (s):
+
+| placement | pageable 4K -> 2M | pinned 4K -> 2M |
+|---|---|---|
+| local: `--cpunodebind=0 --membind=0` (GPU0's node) | 7.226 -> 7.109 (-1.6%) | 4.214 -> 4.192 (-0.5%) |
+| remote: `--cpunodebind=0 --membind=1` | 8.790 -> 8.775 | 5.619 (outlier steps; min 5.33) -> 5.310 |
+| all: `--membind=all`, CPUs free (~50/50 placement) | 7.383 -> 7.232 | 4.330 -> 4.630 (this arm landed 78% on node 1) |
+
+- **Page size:** with placement fixed, 2M is worth ≤1.6% pageable and ≤0.5% pinned. Microbench at 1 GiB, local: pageable H2D 9.49 -> 9.83 GB/s, D2H 17.3 -> 18.4 GB/s; pinned unchanged.
+- **Remote memory:** costs +1.5 s/step pageable and +1.1-1.4 s pinned, almost all in the **optimizer step**: pageable 3.61 -> 5.31 s, pinned 2.19 -> 3.30 s. That is CPU Adam on node-0 CPUs streaming its state from node 1. Backward stays at 3.0-3.2 s.
+- **Copies:** pinned DMA is placement-insensitive (55 GB/s local and remote). Pageable H2D at 1 GiB drops 27% when remote (9.49 -> 6.94 GB/s); D2H drops ~2%.
+- **The 4.64 s pageable backward is CPU-thread placement (`job-20261024T114211Z`, `autorun/hugepage/numa_place_job.sh`, new host).** CPU on node 1 with memory on node 0 (`--cpunodebind=1 --membind=0`) reproduces `022512Z`'s per-phase signature exactly. Pageable: fwd 0.54 s, bwd 4.63 s (local: 0.42 / 3.15), 10.46 s/step overall because the optimizer step is also remote (5.28 s). Pinned is barely affected in backward (1.75 -> 1.93 s). The staged pageable copies run on the CPU threads, so they slow down when those threads sit on the socket far from the GPU. Pinned DMA does not. The same job's `--membind=all` repeat landed in the slow state again (8.82 s/step, bwd 4.66 s), vs 7.38 s in `032725Z`. So `--membind=all` is a scheduler coin flip for the pageable arm.
+- **`--preferred` = `--membind` for local placement:** `--cpunodebind=0 --preferred=0` gives 7.20 / 4.24 s (ACT pageable / pinned), vs 7.16 / 4.22 s with `--membind=0`. It shows 0 faults/step, so a preferred task policy also opts out of NUMA balancing. Unlike bind, it spills to the other node instead of failing when one node is full. MT is placement-insensitive: unpinned 10.49 vs 10.39 s, pinned 3.77 vs 3.78 s for local-preferred vs `--membind=all`. Binding to one node halves the CPU Adam threads (96 of 192), which costs MT's optimizer step what local placement saves in backward.
+- **Best condition:** CPU and memory bound to the GPU's node, at plain 4K. Pageable 7.23 s, pinned 4.21 s, ~0.05 s step spread, pin speedup 1.71x. `--membind=all` only disables balancing; placement stays random and swings runs by 0.3-1.5 s.
+
+**Methodology consequence.** Single-device e2e benches: launch under `numactl --cpunodebind=<dev node> --preferred=<dev node>`. The cuda `run.sh` scripts do this from DSE `31db0b7`; npu takes `NUMA_NODE=<n>`. Use `numactl --membind=all` only when the node is unknown (§2a Rule 2). Multi-rank runs must bind each rank to its own device's node, never all ranks to one node. The cuda/npu `run.sh` scripts do this from DSE `895f338`. Published H200 rows measured unbound on `numa_balancing=1` hosts carry this noise; decide per chart whether to re-run them bound (preferred) or footnote them.
+
+**Possible DeepSpeed follow-up (not started):** set an explicit bind mempolicy (`mbind`) on DeepSpeed-allocated offload buffers and the CPU Adam state, so users get this without `numactl`.
 
 ### Writer constraints
 
