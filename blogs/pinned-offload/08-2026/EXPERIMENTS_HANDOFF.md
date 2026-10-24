@@ -270,7 +270,28 @@ Environment: single Ascend 910B4, **29.5 GiB HBM** (32 GiB physical, ~2.5 GiB fi
 | **H2D/D2H microbench** | 256 MiB transfers, native-registered pin vs pageable | H2D **5.47x** (10.13->55.40 GB/s), D2H **3.35x** (16.38->54.93 GB/s) (`job-20261023T131838Z`, host buffer written before timing; supersedes the 2.67x zero-page artifact) |
 | **Saved-activation offload** (Qwen3-8B) | Widened scope, `--offload-tensors -1`, `--credits 1`, ZeRO-2 CPU AdamW, batch 1, seq 64K | **3.80x** (125.345->33.002 s) |
 
+**Footnote (2026-10-24):** the speedups above are unbound, balancing-on runs. Bound re-runs (, table "H200 bound re-run of the published rows" below) give MT 2.82x, ACT 1.15x, SAO 2.83x. Quote bound numbers with the placement stated.
+
 Full evidence, job IDs, and per-seqlen breakdowns for each row are in the tables below.
+
+### H200 bound re-run of the published rows (2026-10-24, `job-20261024T171244Z`)
+
+Same host, same day. "Unbound" = the published launch (no NUMA policy, balancing on). "Bound" = `numactl --cpunodebind=0 --preferred=0`, the GPU0-node launch that `run.sh` now uses (`autorun/hugepage/published_rows_bound_job.sh`, DSE `31db0b7`). Avg step unless noted.
+
+| Row | Published | Unbound pageable -> pinned (speedup) | Bound pageable -> pinned (speedup) |
+|---|---|---|---|
+| (1) Model-tensor ZeRO-3, Qwen3-8B, seq 4096, steps 10 | 3.40x (13.583 -> 3.998 s) | 11.78 -> 4.06 s (**2.90x**) | 10.46 -> 3.71 s (**2.82x**) |
+| (2) Activation checkpoint, Qwen3-8B, seq 65536, steps 10 | 1.19x (29.990 -> 25.303 s) | 34.89 -> 27.17 s (**1.28x**; min 31.21 -> 27.09) | 30.68 -> 26.78 s (**1.15x**) |
+| (3) Saved-activation, widened, credits 1, prefetch 2, seq 65536, steps 10 | 3.80x (125.345 -> 33.002 s) | 147.9 -> 33.1 s median (**4.46x**) | 91.5 -> 32.3 s median (**2.83x**) |
+| (4) H2D/D2H 256 MiB, rep 3 (3 reps run; reps 1-2 in log) | 5.47x H2D, 3.35x D2H | H2D 10.23 -> 55.40 (5.4x); D2H 16.11 -> 55.00 (3.4x) | H2D 10.29 -> 55.40 (5.4x); D2H 17.50 -> 54.99 (3.1x) |
+
+Reading:
+- **Pinned times are stable across placements** (MT 4.06 vs 3.71 s, ACT 27.2 vs 26.8 s, SAO 33.1 vs 32.3 s). Pinned is ~0.3-1% faster bound, and about 1-3% below the published pinned values for ACT/SAO.
+- **Pageable times are what placement changes.** Unbound, ACT pageable at 64K had ~16.8M minor faults/step (NUMA hinting faults, 15.9M), and SAO pageable had a 1.5 s arm spread (0.1 s bound). The unbound pageable baseline is therefore not reproducible; the bound one is.
+- **The published speedups do not hold under bound placement:** SAO 3.80x -> 2.83x, MT 3.40x -> 2.82x, ACT 1.19x -> 1.15x. The 2026-10-12 MT re-runs (2.8-2.96x) already said this for MT. SAO is the largest change, and is driven by the pageable arm, not the pinned arm.
+- **H2D/D2H:** pinned DMA is unchanged by placement; pageable D2H is ~3% higher bound.
+
+**Recommendation for the blog:** quote the bound column with the placement stated, and keep the unbound column as a footnote showing NUMA-balancing cost. Do not present 3.80x or 3.40x as current results.
 
 ### Required (blocks publish)
 
