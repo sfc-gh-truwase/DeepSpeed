@@ -114,14 +114,14 @@ Three workloads, all required (peer applications):
 - **`--offload-tensors -1`, not a 1/2/3 sweep.** Under the whole-layer scope, a K cap *raises* peak HBM: unselected eligible tensors stay resident instead of passing through the bounded credit pool. At K=1, peak HBM went from 54.30 to 83.01 GB at seq 8K, and the run OOMed at 32K (job `20261011T105335Z`). The old MLP-only K=1/2/3 table (job `20261007T215537Z`, seq 4096, 2.00× / 2.09× / 2.20×) is superseded history, not a published row. `r` was a K-sweep metric and is not reported for the published rows.
 - **`--credits 1` (`N=1`), not 2.** `N` bounds how many forward layer-groups are held resident. Offloaded bytes are identical at either setting. `N=1` cuts peak HBM at long sequence and costs no measurable step time:
 
-  | seq | pin speedup (N=1) | pinned step (N=1) | peak HBM N=2 → N=1 |
-  |---|---|---|---|
-  | 8K | 3.08× | 5.76 s | 54.30 → 54.30 GB (no change) |
-  | 16K | 4.24× | 8.45 s | 59.44 → 59.44 GB (no change) |
-  | 32K | 4.36× | 14.94 s | 82.04 → 75.54 GB (−8%) |
-  | 64K | 3.80× | 33.00 s | 138.48 → 125.10 GB (−10%) |
+  | seq | pin speedup (N=1), unbound as published | **pin speedup, bound** | pinned step, bound | peak HBM N=2 → N=1 |
+  |---|---|---|---|---|
+  | 8K | 3.08× | **3.03×** (16.16 → 5.32 s) | 5.32 s | 54.30 → 54.30 GB (no change) |
+  | 16K | 4.24× | **3.32×** (26.47 → 7.98 s) | 7.98 s | 59.44 → 59.44 GB (no change) |
+  | 32K | 4.36× | **3.25×** (47.26 → 14.53 s) | 14.53 s | 82.04 → 75.54 GB (−8%) |
+  | 64K | 3.80× | **2.83×** (91.5 → 32.3 s) | 32.3 s | 138.48 → 125.10 GB (−10%) |
 
-  These speedups are **unbound** runs (no NUMA policy, balancing on). The 64K point re-run bound to GPU0's node (`job-20261024T171244Z`) gives **2.83×** (91.5 → 32.3 s median; unbound on the same host: 4.46×, 147.9 → 33.1 s). The pinned arm hardly moves; the pageable arm drops by 38%. 8K/16K/32K have not been re-run bound. Re-run them before printing this table. The pinned step time at `N=1` is within ±2.3% of `N=2` at every seq. Sources: `N=1` is job `20261011T171729Z` (dataset of record); `N=2` is job `20261011T005859Z`. At seq 8K/16K a different allocation sets the peak, so `N` does not move it.
+  These speedups are **unbound** runs (no NUMA policy, balancing on). Bound = `numactl --cpunodebind=0 --preferred=0`, medians. 8K–32K are from `job-20261026T133233Z`; 64K is from `job-20261024T171244Z`, on a different host, so it is comparable within its own row only. Same-host unbound re-runs gave 3.60× / 3.73× / 4.98× / 4.46×, with run-to-run spread up to 5.4 s at 8K. Bound spread was ≤0.37 s. The pinned arm moves 4–8%; the pageable arm moves 16–38%. **Print the bound column.** Its message: pinning gives about 3× at 8K–32K and 2.8× at 64K. The pinned step time at `N=1` is within ±2.3% of `N=2` at every seq. Sources: `N=1` is job `20261011T171729Z` (dataset of record); `N=2` is job `20261011T005859Z`. At seq 8K/16K a different allocation sets the peak, so `N` does not move it.
 - **`--prefetch 2` (`M=2`) kept for the published rows.** `M=1` cuts peak HBM further at 64K (125.10 → 97.88 GB, −22%), but pinned step time rises 12.3% (33.00 → 37.06 s, job `20261018T110757Z`). The pin speedup rises to 4.28× only because the pageable arm slows more. That makes `M=1` a memory-headroom ablation, not the published row. Qwen3.5-9B shows the same pattern: −29% HBM for +4–10% step time.
 - **Ceiling: seq 64K.** At seq 98K the engine runs out of HBM: parameters, optimizer state, and held credit groups together exceed 139.8 GB. This is a real capacity limit, not a discovery artifact. Seq ≥32K uses linearly extrapolated discovery (`--discover-calib-seqs 4096 8192`), validated as an exact match against real discovery at 8K.
 - **Qwen3.5-9B** (own chart) uses the same settings, seq 2K–64K, job `20261017T235002Z`: 3.68× / 2.73× / 3.19× / 4.30× / 5.14× / 7.93× at 2K/4K/8K/16K/32K/64K.
@@ -283,7 +283,7 @@ Writer constraints for this script:
 ## Claims that need evidence
 
 - Pin vs non-pin wall time for **model-tensor and activation checkpoint** on **Intel Arc Pro B60**, H200, **Ascend 910B4** (Qwen3-4B), and **GH200**, on **Qwen3**.
-- Pin vs non-pin wall time for **saved-activation** on H200, Qwen3-8B, `N=1`, `--offload-tensors -1`, seq 8K/16K/32K/64K (unbound: 3.08× / 4.24× / 4.36× / 3.80×; 64K bound: 2.83×; 8K-32K bound pending), and on GH200 Qwen3-8B, batch 1, seq 8K/16K/32K, K=-1, N=2 (1.14× / 1.13× / 1.17×). B60: required, numbers pending. Ascend: Qwen3-4B, batch 1, seq 2048, 1.14× (9.48→8.34 s). Qwen3.5 is required, own chart.
+- Pin vs non-pin wall time for **saved-activation** on H200, Qwen3-8B, `N=1`, `--offload-tensors -1`, seq 8K/16K/32K/64K (bound: 3.03× / 3.32× / 3.25× / 2.83×; unbound as published: 3.08× / 4.24× / 4.36× / 3.80×), and on GH200 Qwen3-8B, batch 1, seq 8K/16K/32K, K=-1, N=2 (1.14× / 1.13× / 1.17×). B60: required, numbers pending. Ascend: Qwen3-4B, batch 1, seq 2048, 1.14× (9.48→8.34 s). Qwen3.5 is required, own chart.
 - Ascend H2D/D2H: native-registered vs pageable at 256 MiB. GH200 H2D/D2H: four arms at 4/64/256 MiB, own panel. At 256 MiB, pageable and native-registered are within 4%. At 4 MiB, pinned is 1.3–1.5×.
 - Do not present synthetic MLP as a Qwen result.
 - **NUMA methodology (H200, `job-20261024T022512Z`, `114211Z`, `171244Z`):** published e2e rows are run under `numactl --cpunodebind=<accelerator node> --preferred=<accelerator node>` (what the `run.sh` scripts do), or footnoted. Under that policy the published H200 rows give MT 2.82×, ACT 64K 1.15×, SAO 64K 2.83×, vs 3.40× / 1.19× / 3.80× published. Pinned times are stable across placements; the pageable arm is what moves. Earlier note, kept for context: on hosts with `kernel.numa_balancing=1`, unbound runs carry the balancing cost. At 4K pages, balancing causes 1.6-6.8M minor faults per step, in both arms. It adds jitter (ACT pinned max 5.12 vs 4.70 s bound) and shifts averages (MT pinned 4.06 vs 3.78 s). Pin speedup stays ~1.9x ACT / ~3.1x MT either way, so the headline holds; the absolute times and error bars change. Check whether the existing H200 rows were run unbound.

@@ -291,6 +291,16 @@ Reading:
 - **The published speedups do not hold under bound placement:** SAO 3.80x -> 2.83x, MT 3.40x -> 2.82x, ACT 1.19x -> 1.15x. The 2026-10-12 MT re-runs (2.8-2.96x) already said this for MT. SAO is the largest change, and is driven by the pageable arm, not the pinned arm.
 - **H2D/D2H:** pinned DMA is unchanged by placement. Pageable D2H is ~7% higher bound (17.31 vs 16.11 GB/s median), and the bound reps have no outlier.
 
+**Saved-activation sweep 8K–32K, bound vs unbound (`job-20261026T133233Z`, new host after recycle, `autorun/hugepage/sao_sweep_bound_job.sh`), medians:**
+
+| seq | unbound pageable -> pinned (speedup, arm spread) | bound pageable -> pinned (speedup, arm spread) |
+|---|---|---|
+| 8K | 20.61 -> 5.72 s (3.60x, 5.42 s) | 16.16 -> 5.32 s (**3.03x**, 0.29 s) |
+| 16K | 31.62 -> 8.48 s (3.73x, 1.25 s) | 26.47 -> 7.98 s (**3.32x**, 0.37 s) |
+| 32K | 75.49 -> 15.15 s (4.98x, 2.15 s) | 47.26 -> 14.53 s (**3.25x**, 0.25 s) |
+
+Published (unbound, `20261011T171729Z`): 3.08x / 4.24x / 4.36x. The pattern matches 64K: pinned moves 4-8% and pageable 16-38%, and the unbound arm spread is 3-19x larger.
+
 **Recommendation for the blog:** quote the bound column with the placement stated, and keep the unbound column as a footnote showing NUMA-balancing cost. Do not present 3.80x or 3.40x as current results.
 
 ### Required (blocks publish)
