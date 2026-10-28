@@ -274,6 +274,27 @@ Environment: single Ascend 910B4, **29.5 GiB HBM** (32 GiB physical, ~2.5 GiB fi
 
 Full evidence, job IDs, and per-seqlen breakdowns for each row are in the tables below.
 
+### H200 4K vs 2M page size, all workloads, bound (2026-10-27, `job-20261027T132751Z`)
+
+Every run bound to GPU0's node (`numactl --cpunodebind=0 --preferred=0`, the `run.sh` launch). Page size is the only variable. 2M arms: 95-99.7% of host memory on 2 MiB pages; 4K arms: 0%. All memory on node 0. Script: `autorun/hugepage/bound_sweep_4k_2m_job.sh`, chained after the probe via `env_probe_sweep_job.sh`. Medians; seq rows are one run per arm per page size.
+
+| Workload | 4K pageable -> pinned (speedup) | 2M pageable -> pinned (speedup) |
+|---|---|---|
+| Model-tensor, seq 4096 | 10.46 -> 3.82 s (2.74x) | 10.37 -> 3.68 s (2.82x) |
+| Activation checkpoint, seq 8192 | 7.03 -> 4.30 s (1.63x; 1.68x by min step) | 7.10 -> 4.15 s (1.71x) |
+| Activation checkpoint, seq 65536 | 30.48 -> 26.64 s (1.14x) | 30.46 -> 26.59 s (1.15x) |
+| Saved-activation, seq 8192 | 16.04 -> 5.33 s (3.01x) | 15.82 -> 5.23 s (3.03x) |
+| Saved-activation, seq 16384 | 26.46 -> 8.00 s (3.31x) | 26.06 -> 7.88 s (3.31x) |
+| Saved-activation, seq 32768 | 47.97 -> 14.57 s (3.29x) | 47.13 -> 14.43 s (3.27x) |
+| Saved-activation, seq 65536 | 92.01 -> 32.39 s (2.84x) | 90.15 -> 32.22 s (2.80x) |
+| H2D 256 MiB (median of 3) | 10.20 -> 55.40 GB/s (5.43x) | 10.56 -> 55.54 GB/s (5.26x) |
+| D2H 256 MiB (median of 3) | 17.06 -> 54.97 GB/s (3.22x) | 17.92 -> 55.32 GB/s (3.09x) |
+| H2D 1 GiB (median of 3) | 9.44 -> 55.43 GB/s (5.87x) | 9.75 -> 55.57 GB/s (5.70x) |
+
+**Reading:** with placement fixed, page size moves any H200 arm by 4% or less, and pin speedups by 0.08x or less. Pinned gains slightly more than pageable from 2M. Huge pages don't close the pin gap. The earlier 2M step-time gains were NUMA placement and balancing, not page size.
+
+**Staging probe (same job):** pageable copies make no `mlock` calls and no extra `ioctl`/`mmap` calls compared with pinned copies (40 copies of 256 MiB, 4K and 2M). That's no per-copy pinning syscall on CUDA. Kernel-internal page pinning (`pin_user_pages`) wasn't traced.
+
 ### H200 bound re-run of the published rows (2026-10-24, `job-20261024T171244Z`)
 
 Same host, same day. "Unbound" = the published launch (no NUMA policy, balancing on). "Bound" = `numactl --cpunodebind=0 --preferred=0`, the GPU0-node launch that `run.sh` now uses (`autorun/hugepage/published_rows_bound_job.sh`, DSE `31db0b7`). Avg step unless noted.
