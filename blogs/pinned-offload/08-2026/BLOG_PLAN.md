@@ -17,7 +17,7 @@ Do **not** use “DeepSpeed Offload,” “Faster Transfers,” or “Explicit L
 
 **Pitch:** CPU offload is a **cost-efficiency** and **capability** tool for deep learning: run on smaller or cheaper GPUs, and train workloads that would not fit otherwise. It has **more than one application**, presented as peers:
 
-1. **Model-tensor offload** — parameters and optimizer states (DeepSpeed ZeRO CPU offload is the mechanism, not the headline). Gradients are the same idea; only claim them if the optional #8207 row is measured.
+1. **Model-tensor offload** — parameters and optimizer states (DeepSpeed ZeRO CPU offload is the mechanism, not the headline). Gradients are the same idea; this post does not measure them.
 2. **Activation checkpoint workload** — checkpoint inputs moved to host during forward, then rematerialized, so long sequences fit. The published workload is that offload together with ZeRO-2 CPU AdamW (`--offload-optimizer`; parameters stay on GPU) and `--act-mem-opt` (Qwen3: Liger fused linear cross-entropy, TiledMLP, and fused cross-entropy). Async copies stay on. Pin on/off moves the activation pool and the optimizer host buffers together. Do **not** call this generic “input offload.”
 3. **Saved-activation offload** — every saved-for-backward tensor in each decoder layer saved to host and reloaded, **without** rematerialization. Credit-bounded: published H200 rows use `N=1` (`--credits 1`), `M=2` (`--prefetch 2`), no per-layer tensor cap (`--offload-tensors -1`). See “Saved-activation settings, as measured” under Benchmark matrix. Published rows use ZeRO-2 CPU AdamW (`--offload-optimizer`); pin toggles activation buffers and optimizer host buffers. A different algorithm from (2), not a config of `CheckpointHiddenStatesOffload`. No `ds_config` field; the blog reports the benchmark, not a shipping API.
 
@@ -64,7 +64,7 @@ Write for **practitioners** who already offload (or are about to) and need to kn
 
 | PR | Relevance to blog |
 |----|-------------------|
-| [#8207](https://github.com/deepspeedai/DeepSpeed/pull/8207) | Default `pin_memory: true`; async grad offload (optional eval row) |
+| [#8207](https://github.com/deepspeedai/DeepSpeed/pull/8207) | Default `pin_memory: true`; async grad offload (not evaluated in this post) |
 | [#8212](https://github.com/deepspeedai/DeepSpeed/pull/8212) / [#8236](https://github.com/deepspeedai/DeepSpeed/pull/8236) / [#8211](https://github.com/deepspeedai/DeepSpeed/pull/8211) | Shared manager + native backend (`DS_PIN_MEMORY_BACKEND`) |
 | [#8283](https://github.com/deepspeedai/DeepSpeed/pull/8283) | Native `mlock` then **`cudaHostRegister`** on CUDA (default on); H200: registered native matches Torch (~53–55 GB/s), unregistered ~10–17 GB/s |
 | [#8282](https://github.com/deepspeedai/DeepSpeed/pull/8282) | Activation checkpoint CPU offload (HF hooks + native `cpu_checkpointing`); `use_pin_memory` (default true). Replaced closed [#8181](https://github.com/deepspeedai/DeepSpeed/pull/8181). Published **async vs blocking on a pinned pool** — not pin vs pageable |
@@ -210,8 +210,6 @@ python h2d_d2h/bench.py
 python h2d_d2h/bench.py --skip-native-register
 ```
 
-**Optional:** `grad_offload/`, `cpu_pin/`, `deepcompile_activation/`.
-
 Writer constraints for this script:
 
 - The H2D/D2H bench must **write the host buffer before timing** (default since 2026-10-23; `--no-touch` reproduces the old behavior). An untouched pageable buffer reads the kernel zero page and inflates pageable H2D (H200: 20.8 vs 10.1 GB/s). Confirm every SKU's published pageable H2D was measured on a written buffer.
@@ -246,11 +244,8 @@ Writer constraints for this script:
 | Experiment | Hardware | Axes | Metric |
 |------------|----------|------|--------|
 | ZeRO-1/2 optimizer offload | High-end CUDA if VRAM allows | `model_tensor_offload/bench.py --zero-stage 1` or `2` | step time |
-| Async grad offload overlap | High-end CUDA | `grad_offload/bench.py` pin on/off | backward+offload wall time |
-| Torch vs native (CPU-only) | CPU host | `cpu_pin/bench.py` | functional |
-| DeepCompile `offload_activation` | High-end CUDA | `deepcompile_activation/bench.py` | iter / mem |
 
-**Publish bar:** **Intel Arc Pro B60**, **H200**, and **Ascend 910B4**, on **Qwen3**. All three workloads and the H2D/D2H microbench are required on all three SKUs. B60 must have **Qwen3** model-tensor (and activation checkpoint unless the engine is a named miss). Ascend 910B4 must have Qwen3-4B model-tensor (batch 1, seq 1024 and seq 2048), the activation checkpoint workload (batch 1, seq 8192), and H2D/D2H native-registered vs pageable. Ascend saved-activation (Qwen3-4B, batch 1, seq 2048) is required and collected. Saved-activation **also blocks publish on H200** for Qwen3-8B (pin on/off, `N=1`, `M=2`, `--offload-tensors -1`, seq 8K–64K; collected), on Ascend 910B4 (Qwen3-4B, batch 1, seq 2048; collected), and on B60 (Qwen3 0.6B/1.7B, batch 1, seq 2048; required as of 2026-10-21, not yet collected). **Qwen3.5 is also a publish gate, on its own chart — never a size-ladder twin of Qwen3.** Do not ship synthetic-only e2e. Do not ship CUDA-only. Do not ship model-tensor-only. Do not treat #8282’s async-vs-blocking table as pin on/off. Do not treat saved-activation as a checkpoint-offload variant. Do not copy H200 numbers onto B60 or Ascend. ZeRO-1/2, grads, and DeepCompile are add-ons.
+**Publish bar:** **Intel Arc Pro B60**, **H200**, and **Ascend 910B4**, on **Qwen3**. All three workloads and the H2D/D2H microbench are required on all three SKUs. B60 must have **Qwen3** model-tensor (and activation checkpoint unless the engine is a named miss). Ascend 910B4 must have Qwen3-4B model-tensor (batch 1, seq 1024 and seq 2048), the activation checkpoint workload (batch 1, seq 8192), and H2D/D2H native-registered vs pageable. Ascend saved-activation (Qwen3-4B, batch 1, seq 2048) is required and collected. Saved-activation **also blocks publish on H200** for Qwen3-8B (pin on/off, `N=1`, `M=2`, `--offload-tensors -1`, seq 8K–64K; collected), on Ascend 910B4 (Qwen3-4B, batch 1, seq 2048; collected), and on B60 (Qwen3 0.6B/1.7B, batch 1, seq 2048; required as of 2026-10-21, not yet collected). **Qwen3.5 is also a publish gate, on its own chart — never a size-ladder twin of Qwen3.** Do not ship synthetic-only e2e. Do not ship CUDA-only. Do not ship model-tensor-only. Do not treat #8282’s async-vs-blocking table as pin on/off. Do not treat saved-activation as a checkpoint-offload variant. Do not copy H200 numbers onto B60 or Ascend. ZeRO-1/2 optimizer-only offload is an add-on.
 
 **B60 activation (no weasel words):** required, same as model-tensor. If the activation engine **does not run** on stock PyTorch XPU, the activation section **must open** with that named limitation (commit, error, or missing API). Do **not** imply Intel activation numbers exist. Do **not** drop B60 from model-tensor or H2D/D2H. That incomplete vendor-diversity for activations is explicit, not silent.
 
