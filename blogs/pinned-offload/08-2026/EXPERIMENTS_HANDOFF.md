@@ -443,13 +443,13 @@ project memory if needed later, but are not part of this doc or the blog.
 | model-tensor, seq 4096 | 11.55 -> 4.11 s (2.81x) | 13.72 -> 4.51 s (3.04x) |
 | saved-activation, 2K | 9.79 -> 3.99 s (2.45x, 0.02 s) | 3.68x |
 | saved-activation, 4K | 13.00 -> 4.70 s (2.77x, 0.16 s) | 2.73x |
-| saved-activation, 8K | 16.91 -> 4.98 s (3.40x, 4.16 s) | 3.19x |
-| saved-activation, 16K | 29.98 -> 9.13 s (3.28x, 3.96 s) | 4.30x |
+| saved-activation, 8K | 19.2 -> 6.14 s (3.13x; repeats 3.12x, 3.14x; first run 16.91 -> 4.98 s, 3.40x, not reproduced) | 3.19x |
+| saved-activation, 16K | 31.4 -> 9.14 s (3.44x; repeats 3.45x, 3.43x; first run 3.28x) | 4.30x |
 | saved-activation, 32K | 57.33 -> 15.50 s (3.70x, 0.39 s) | 5.14x |
-| saved-activation, 64K | 108.12 -> 29.38 s (3.68x, 3.71 s) | 7.93x |
+| saved-activation, 64K | 107.8 -> 29.4 s (3.67x; repeats 3.68x, 3.65x) | 7.93x |
 
 - **16K needs calibrated discovery on Qwen3.5-9B** (`--discover-calib-seqs 4096 8192` from seq >=16384, not >=32768 as for Qwen3-8B). The first bound attempt ran 16K uncalibrated and hit CUDA OOM (138.4 GiB allocated) in discovery, the same failure as `job-20261016T141158Z`; the calibrated rerun passed.
-- **Spread:** 8K, 16K and 64K have ~4 s arm spread even bound (Qwen3-8B bound <=0.4 s). Repeats queued as `job-20261105T165925Z` (8K/16K/64K, two reps each). Do not print these three rows until the repeats agree.
+- **Repeats (`job-20261105T165925Z`, two reps each at 8K/16K/64K):** 16K and 64K speedups agree within 0.03x across reps. The 8K pinned time was 6.14 s in both reps, against 4.98 s in the first bound run, so the first run's 8K row did not reproduce. Print the repeat medians.
 - Same pattern as Qwen3-8B: pinned barely moves, pageable drops bound, so the 32K/64K speedups fall from 5.1x/7.9x to 3.7x.
 
 
