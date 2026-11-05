@@ -371,7 +371,7 @@ Lead with **64K fits**. Pin/pageable wall time is secondary. Say “longest demo
 
 Do not attribute 64K (or 8K 1.71×) solely to activation DMA. The activation checkpoint workload is checkpoint offload plus ZeRO-2 CPU AdamW plus tiled/fused kernels.
 
-96K/128K (`job-20260928T140704Z`, steps=10; supersedes the noisier steps=4 probe `job-20260928T132833Z`, which had shown a non-monotonic 96K bump to 1.35× — that was a small-sample artifact) both ran successfully well under H200's ~140 GB capacity, extending the demonstrated range past 64K. The pin/pageable ratio now decreases monotonically with seqlen (1.19×→1.17×→1.09×): as sequence length grows, compute increasingly dominates the step and the activation-DMA saving becomes a shrinking fraction of it. Still lead the blog claim with 64K as the "capability" headline; 96K/128K are evidence the mechanism keeps working further out, not a new headline number.
+96K/128K (`job-20260928T140704Z`, steps=10; supersedes the noisier steps=4 probe `job-20260928T132833Z`, which had shown a non-monotonic 96K bump to 1.35× — that was a small-sample artifact) both ran successfully well under H200's ~140 GB capacity, extending the demonstrated range past 64K. The pin/pageable ratio now decreases monotonically with seqlen (1.19×→1.17×→1.09×): as sequence length grows, compute increasingly dominates the step and the activation-DMA saving becomes a shrinking fraction of it. Still lead the blog claim with 64K as the "capability" headline, matching saved-activation's 64K capacity ceiling so both remat workloads share one sequence range (decision 2026-11-05); 96K/128K are evidence the mechanism keeps working further out, not a new headline number.
 
 Qwen3.5-9B from this job was pre-`fla` and is superseded — see the Qwen3.5-9B section below.
 
@@ -435,6 +435,23 @@ Qwen3-4B/8B only. The raw Qwen3-32B seq=4096/seq=65536 numbers were measured and
 project memory if needed later, but are not part of this doc or the blog.
 
 ### Qwen3.5-9B (required, own chart)
+
+**Bound re-run (2026-11-05, `job-20261105T120256Z`; 16K from `20261105T162755Z`), `numactl --cpunodebind=0 --preferred=0`, medians:**
+
+| workload | bound pageable -> pinned (speedup, arm spread) | unbound, published |
+|---|---|---|
+| model-tensor, seq 4096 | 11.55 -> 4.11 s (2.81x) | 13.72 -> 4.51 s (3.04x) |
+| saved-activation, 2K | 9.79 -> 3.99 s (2.45x, 0.02 s) | 3.68x |
+| saved-activation, 4K | 13.00 -> 4.70 s (2.77x, 0.16 s) | 2.73x |
+| saved-activation, 8K | 16.91 -> 4.98 s (3.40x, 4.16 s) | 3.19x |
+| saved-activation, 16K | 29.98 -> 9.13 s (3.28x, 3.96 s) | 4.30x |
+| saved-activation, 32K | 57.33 -> 15.50 s (3.70x, 0.39 s) | 5.14x |
+| saved-activation, 64K | 108.12 -> 29.38 s (3.68x, 3.71 s) | 7.93x |
+
+- **16K needs calibrated discovery on Qwen3.5-9B** (`--discover-calib-seqs 4096 8192` from seq >=16384, not >=32768 as for Qwen3-8B). The first bound attempt ran 16K uncalibrated and hit CUDA OOM (138.4 GiB allocated) in discovery, the same failure as `job-20261016T141158Z`; the calibrated rerun passed.
+- **Spread:** 8K, 16K and 64K have ~4 s arm spread even bound (Qwen3-8B bound <=0.4 s). Repeats queued as `job-20261105T165925Z` (8K/16K/64K, two reps each). Do not print these three rows until the repeats agree.
+- Same pattern as Qwen3-8B: pinned barely moves, pageable drops bound, so the 32K/64K speedups fall from 5.1x/7.9x to 3.7x.
+
 
 Required per `BLOG_PLAN.md` (2026-10-18). Do not cite these beside Qwen3-8B as a size comparison. **Only cite numbers from runs with `fla` + `causal-conv1d` installed** (`job-20261016T193445Z` onward). Earlier Qwen3.5-9B numbers measure a missing-package fallback.
 
