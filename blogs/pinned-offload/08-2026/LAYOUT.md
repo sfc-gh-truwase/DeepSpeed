@@ -48,6 +48,10 @@ Qwen3 is the required family. Hardware table for measured SKUs only: SKU, host C
 
 Host buffers are written before timing (a never-written pageable buffer reads the zero page and inflates pageable H2D). Every e2e row is bound to the accelerator's NUMA node (`numactl --cpunodebind=<n> --preferred=<n>`) and runs at least 10 steps. Report pin speedup within one SKU, one page condition, and one placement. Show the unbound-versus-bound spread once, as the reason for the method.
 
+### Host placement: bound versus unbound (the fair pageable baseline)
+
+On the H200 host, automatic NUMA balancing (`kernel.numa_balancing=1`) moves the pageable arm and leaves the pinned arm nearly unchanged. Unbound pageable times are inflated by balancing and by CPU threads landing on the far socket. Bound (`--cpunodebind` and `--preferred` on the GPU's node) is the best pageable condition we measured, so it is the fair baseline for pinned-versus-pageable. Show the unbound numbers as the cost of leaving placement to the scheduler, not as the pinning result. The bound speedups are smaller, and the post should say so: saved-activation at 64K drops from 4.46× unbound to 2.83× bound, and model-tensor from 2.90× to 2.82×. This is one host with balancing on. Hosts with balancing off, or other GPU-to-CPU topologies, may show less of the gap; the post should record the setting for each machine.
+
 ### Model-tensor offload (Arc Pro B60, H200, Ascend 910B4)
 
 Pin on/off wall time. Ascend’s published model is Qwen3-4B (batch 1, sequence 1024 and 2048).
