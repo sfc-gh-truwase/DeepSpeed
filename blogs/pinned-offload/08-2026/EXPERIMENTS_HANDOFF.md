@@ -1,12 +1,12 @@
 # Handoff — Pin-memory DSE harnesses and blog experiments
 
-**Audience:** agent owning DeepSpeedExamples benches and collecting numbers.  
+**Audience:** agent owning DeepSpeedExamples benches and collecting numbers.\
 **Do not** draft or rewrite [`BLOG_PLAN.md`](BLOG_PLAN.md) or `blogs/pinned-offload/08-2026/README.md`. Return JSON/tables/repro commands to the blog owner.
 
 The activation checkpoint workload is `activation_offload/bench.py --offload-optimizer --act-mem-opt` with async on. Pin on/off moves the activation pool and the ZeRO-2 optimizer host buffers together. GPU-AdamW-only and `--no-act-mem-opt` arms are not this workload.
 
-**GitHub account:** `sfc-gh-truwase` (fork + PRs).  
-**DeepSpeed:** `deepspeedai/DeepSpeed` `master` (pin routing already merged: #8256, #8257, #8258, #8332, #8283).  
+**GitHub account:** `sfc-gh-truwase` (fork + PRs).\
+**DeepSpeed:** `deepspeedai/DeepSpeed` `master` (pin routing already merged: #8256, #8257, #8258, #8332, #8283).\
 **Examples:** `deepspeedai/DeepSpeedExamples`.
 
 ---
@@ -48,7 +48,7 @@ Subfolders + `common.py` (subprocess arms, `ARMRESULT` / `DRIVERRESULT`):
 | `activation_offload/bench.py` | Activation checkpoint workload: `CheckpointHiddenStatesOffload`, `use_pin_memory` on/off, **`use_streams=True`**, HF `--model`, `--offload-optimizer --act-mem-opt`. |
 | `h2d_d2h/bench.py` | Supporting GB/s: pageable, torch, native-unregistered, native-registered. `--skip-native-register` on XPU. Requires DSE `48de051`+ (writes host buffers before timing; reports THP coverage). Follow §2a for every SKU. |
 | `zero3_offload_bench.py` | Compat shim → model-tensor `--zero-stage 3` |
-| `saved_activation_offload/bench.py` | **Peer publish application (3)** ([`SAVED_ACTIVATION_OFFLOAD_PLAN.md`](SAVED_ACTIVATION_OFFLOAD_PLAN.md)): credit-bounded saved-tensor offload over the whole decoder layer, **no rematerialization**. Published command: `--offload-optimizer --act-mem-opt --offload-tensors -1 --credits 1 --prefetch 2` (ZeRO-2 CPU AdamW; parameters stay on GPU; optimizer `pin_memory` follows the pin arm). Pass `--prefetch 2` explicitly: the bench default became 1 in `231034a` (2026-10-18), after the published rows were collected. H200 blocks publish: pin T/F, seq 8K–64K. Settings are justified in `BLOG_PLAN.md` (“Saved-activation settings, as measured”). Accelerator-agnostic via DeepSpeed’s accelerator abstraction (runs on CUDA, XPU, and Ascend NPU). Momentum-free SGD is diagnostic only. B70 is required. |
+| `saved_activation_offload/bench.py` | **Peer publish application (3)** ([`SAVED_ACTIVATION_OFFLOAD_PLAN.md`](SAVED_ACTIVATION_OFFLOAD_PLAN.md)): credit-bounded saved-tensor offload over the whole decoder layer, **no rematerialization**. Published command: `--offload-optimizer --act-mem-opt --offload-tensors -1 --credits 1 --prefetch 2` (ZeRO-2 CPU AdamW; parameters stay on GPU; optimizer `pin_memory` follows the pin arm). Pass `--prefetch 2` explicitly: the bench default became 1 in `231034a` (2026-10-18), after the published rows were collected. H200 blocks publish: pin T/F, seq 8K–64K. Settings are justified in `BLOG_PLAN.md` (“Saved-activation settings, as measured”). Accelerator-agnostic via DeepSpeed’s accelerator abstraction (runs on CUDA, XPU, and Ascend NPU). Momentum-free SGD is diagnostic only. B60 is required. |
 
 Pinned model-tensor arm: `DS_PIN_MEMORY_BACKEND=native`, `DS_PIN_MEMORY_REGISTER_DEVICE=1`. `--ablate-register` is CUDA-only inset, not the pin-vs-pageable story.
 
@@ -60,29 +60,29 @@ Activation checkpoint pin/pageable toggles **both** the activation pool and ZeRO
 
 ## 2. Experiments to collect
 
-**Hardware (required):** **Intel Arc Pro B70** (stock PyTorch `xpu`, not IPEX), one high-end CUDA PCIe (H200), **Ascend 910B4**. GH200 and GB200 are optional.
+**Hardware (required):** **Intel Arc Pro B60** (stock PyTorch `xpu`, not IPEX), one high-end CUDA PCIe (H200), **Ascend 910B4**. GH200 and GB200 are optional.
 
 **Models (required for published e2e):** Hugging Face **Qwen3** (dense `Qwen3ForCausalLM`). **Qwen3.5 is also required** (per `BLOG_PLAN.md`, 2026-10-18), always on its own chart. Instantiation may be config + random weights. Do **not** ship synthetic-only e2e. If a Qwen3.5 figure is included, do **not** plot it against Qwen3-8B as a size twin.
 
 | SKU | Qwen3 (required) | Qwen3.5 (required, own chart) |
 |-----|-------|---------|
-| Intel Arc Pro B70 | `Qwen/Qwen3-0.6B` if host RAM is under ~48 GB, else `Qwen/Qwen3-1.7B` | `Qwen/Qwen3.5-0.8B` or `Qwen/Qwen3.5-2B` |
+| Intel Arc Pro B60 | `Qwen/Qwen3-0.6B` if host RAM is under ~48 GB, else `Qwen/Qwen3-1.7B` | `Qwen/Qwen3.5-0.8B` or `Qwen/Qwen3.5-2B` |
 | High-end CUDA | `Qwen/Qwen3-8B` | `Qwen/Qwen3.5-9B` |
 | Ascend 910B4 (29.5 GiB HBM usable) | `Qwen/Qwen3-4B`, batch 1, seq 1024 and seq 2048 | Qwen3.5-4B collected |
 | GH200 (`galleon` GPU0) | Qwen3-8B, batch 1, seq 8192/16384/32768 for activation checkpoint and saved-activation. Model-tensor not yet run | optional |
 
-H200 model-tensor used `deepspeed.zero.Init` (not the ~27 bytes/param no-Init planning figure). Measured CPU-resident offload: 8B 137.31 GB, 9B 150.10 GB. For B70 without `zero.Init`, plan ~27 bytes/param or use `zero.Init`. Raise `ulimit -l`.
+H200 model-tensor used `deepspeed.zero.Init` (not the ~27 bytes/param no-Init planning figure). Measured CPU-resident offload: 8B 137.31 GB, 9B 150.10 GB. For B60 without `zero.Init`, plan ~27 bytes/param or use `zero.Init`. Raise `ulimit -l`.
 
 **Qwen3.5 software:** Transformers that registers `qwen3_5` (newer than 4.57.6 on some boxes). Prefer **text-only** `from_config`. Log transformers version. No MoE/FP8. **Update (2026-10-16, `job-20261016T162911Z`):** liger-kernel `0.8.4` (torch214 env rebuild) now does attach to `qwen3_5_text` -- `apply_liger_kernel_to_qwen3_5` accepts `fused_linear_cross_entropy` (confirmed via `inspect.signature` in the job's VERIFY step), so the activation checkpoint workload gets the same `liger_qwen3_5` + `liger_fused_linear_ce` recipe as Qwen3-8B's `liger_qwen3` + `liger_fused_linear_ce`, not the TiledMLP + `TiledFusedLogitsLoss` fallback described below (stale as of liger-kernel 0.6.1/0.8.3).
 
-**Still open:** XPU native pin may fail on B70 (named limitation). ZeRO-3 unpinned param-buffer validity unverified.
+**Still open:** XPU native pin may fail on B60 (named limitation). ZeRO-3 unpinned param-buffer validity unverified.
 
 **Required rows**
 
-1. Model-tensor: `python model_tensor_offload/bench.py --model Qwen/...` unpinned vs pinned on B70, H200, and Ascend 910B4 (GH200 optional). Synthetic `--hidden/--layers` is **smoke only**. B70: no `--ablate-register`. Ascend published model is Qwen3-4B.
-2. Activation checkpoint workload: `python activation_offload/bench.py --model Qwen/Qwen3-... --offload-optimizer --act-mem-opt` pageable vs pinned, async on. Pitch: **longest demonstrated sequence length**. If B70 cannot run the engine, **named limitation** (commit + error) — do not invent numbers; still run Qwen3 model-tensor + H2D/D2H on B70. Do not label synthetic bars as Qwen.
-3. H2D/D2H: `python h2d_d2h/bench.py` on H200, Ascend 910B4, and GH200; B70 with `--skip-native-register`. No HF model. Pageable vs pinned is the story; Torch vs native-registered is a CUDA parity inset. Ascend’s measured arm is native-registered vs pageable. Keep GH200 and Ascend off the H200 GB/s chart. **Follow §2a**: written host buffers (never `--no-touch`), NUMA-bound plus unbound runs, recorded THP mode and page backing; optional 4K-vs-2M page-size arms.
-4. Saved-activation offload (peer publish application; H200 is required, GH200 optional): `python saved_activation_offload/bench.py --model Qwen/Qwen3-8B --offload-optimizer --act-mem-opt --offload-tensors -1 --credits 1 --prefetch 2` on H200, pin T/F, seq 8K/16K/32K/64K (add `--discover-calib-seqs 4096 8192` at seq ≥32K). GH200 was measured at `N=2`; keep that label and do not copy the H200 ratio. ZeRO-2 CPU AdamW; pin toggles activation buffers and optimizer host buffers. Qwen3.5-9B is required (own chart). The script is accelerator-agnostic (DeepSpeed accelerator abstraction). B70 is required: Qwen3 (same ID as B70 model-tensor), batch 1, seq 2048, same flags, pin T/F; Qwen3.5-0.8B/2B own chart; named limitation (commit + error) only if it actually fails on XPU. Ascend 910B4 is required and collected (Qwen3-4B, batch 1, seq 2048, 1.14×). Full details in `SAVED_ACTIVATION_OFFLOAD_PLAN.md` §10.
+1. Model-tensor: `python model_tensor_offload/bench.py --model Qwen/...` unpinned vs pinned on B60, H200, and Ascend 910B4 (GH200 optional). Synthetic `--hidden/--layers` is **smoke only**. B60: no `--ablate-register`. Ascend published model is Qwen3-4B.
+2. Activation checkpoint workload: `python activation_offload/bench.py --model Qwen/Qwen3-... --offload-optimizer --act-mem-opt` pageable vs pinned, async on. Pitch: **longest demonstrated sequence length**. If B60 cannot run the engine, **named limitation** (commit + error) — do not invent numbers; still run Qwen3 model-tensor + H2D/D2H on B60. Do not label synthetic bars as Qwen.
+3. H2D/D2H: `python h2d_d2h/bench.py` on H200, Ascend 910B4, and GH200; B60 with `--skip-native-register`. No HF model. Pageable vs pinned is the story; Torch vs native-registered is a CUDA parity inset. Ascend’s measured arm is native-registered vs pageable. Keep GH200 and Ascend off the H200 GB/s chart. **Follow §2a**: written host buffers (never `--no-touch`), NUMA-bound plus unbound runs, recorded THP mode and page backing; optional 4K-vs-2M page-size arms.
+4. Saved-activation offload (peer publish application; H200 is required, GH200 optional): `python saved_activation_offload/bench.py --model Qwen/Qwen3-8B --offload-optimizer --act-mem-opt --offload-tensors -1 --credits 1 --prefetch 2` on H200, pin T/F, seq 8K/16K/32K/64K (add `--discover-calib-seqs 4096 8192` at seq ≥32K). GH200 was measured at `N=2`; keep that label and do not copy the H200 ratio. ZeRO-2 CPU AdamW; pin toggles activation buffers and optimizer host buffers. Qwen3.5-9B is required (own chart). The script is accelerator-agnostic (DeepSpeed accelerator abstraction). B60 is required: Qwen3 (same ID as B60 model-tensor), batch 1, seq 2048, same flags, pin T/F; Qwen3.5-0.8B/2B own chart; named limitation (commit + error) only if it actually fails on XPU. Ascend 910B4 is required and collected (Qwen3-4B, batch 1, seq 2048, 1.14×). Full details in `SAVED_ACTIVATION_OFFLOAD_PLAN.md` §10.
 5. Ascend 910B4 (required, already measured): model-tensor Qwen3-4B batch 1 seq 1024 and seq 2048; activation checkpoint workload Qwen3-4B batch 1 seq 8192; H2D/D2H native-registered vs pageable at 256 MiB. Qwen3.5-4B model-tensor is collected.
 6. GH200 (`ds-pin-Xinyu-experiment.pdf`, `galleon` GPU0, node 0, Examples `5b16fe4`, October 2026): H2D/D2H, activation checkpoint, and saved-activation are measured. Model-tensor is not in the PDF; GH200 is optional so it does not block. Do not copy PCIe or H200 numbers. The PDF’s DeepNVMe figure is out of scope.
 
@@ -159,7 +159,7 @@ Each host allocation path has its own switch:
 - The H200 study's helper scripts do exactly this. They live in `autorun/hugepage/` of the `sfc_ds_pin_memory` workspace, not in the DSE repo; copy them or reimplement them:
   - `thp_probe.py`: per-allocation-path coverage gate.
   - `thp_sampler.py`: per-process coverage and fault sampler for e2e.
-  - `overlap_probe.py`: copy concurrent with a GEMM. It uses `torch.cuda` directly; port it to `get_accelerator()` streams and events on non-CUDA devices.
+  - `overlap_probe.py`: copy concurrent with a GEMM. It calls the CUDA stream and event APIs directly; port it to `get_accelerator()` streams and events on non-CUDA devices.
 
 ### Rule 5 — e2e timing hygiene
 
@@ -208,7 +208,7 @@ env $E numactl --cpunodebind=$N --preferred=$N python $B/model_tensor_offload/be
 ## 3. Suggested agent sequence
 
 1. Push nested-clone harness (HF `--model`, activation checkpoint workload flags, offload size) to `sfc-gh-truwase` and open a new PR against `deepspeedai/DeepSpeedExamples` — #1015 is already merged, not a target to push onto.
-2. Collect B70: model-tensor + H2D/D2H (`--skip-native-register`; no `--ablate-register`) + the activation checkpoint workload + saved-activation (smaller IDs from §2; saved-activation batch 1 × seq 2048). Log DeepSpeed commit ≥ #8283, transformers, SKU, `ulimit -l`, Torch version. Named limitation if activation engine or Qwen3.5 fails.
+2. Collect B60: model-tensor + H2D/D2H (`--skip-native-register`; no `--ablate-register`) + the activation checkpoint workload + saved-activation (smaller IDs from §2; saved-activation batch 1 × seq 2048). Log DeepSpeed commit ≥ #8283, transformers, SKU, `ulimit -l`, Torch version. Named limitation if activation engine or Qwen3.5 fails.
 3a. Ascend 910B4 rows below are already measured. GH200 H2D/D2H, activation checkpoint, and saved-activation are in `ds-pin-Xinyu-experiment.pdf`. GH200 model-tensor is optional.
 4. Drop `DRIVERRESULT=` JSON (and H2D/D2H CSV) in a results dir **outside** the blog README unless the blog owner asks to copy figures.
 5. Hand numbers back. Do not start `blogs/pinned-offload/08-2026/README.md`.
@@ -238,7 +238,7 @@ Stale RTD (`docs/code-docs/source/memory.rst` still describing native as mlock-o
 
 **H200 box:** 8×H200 node `tunji-h200-n1g8-ds-pin-0`, **one GPU** (`WORLD_SIZE=1`). Torch `2.14.0+cu130`, transformers `5.16.0.dev0`, flash-attn `2.8.3`, `ulimit -l unlimited`, `PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True`, DeepSpeed on `PYTHONPATH`. Logs: `autorun/logs/job-<id>.log`. Liger `0.8.3` applied only to the activation checkpoint workload on Qwen3-8B (not model-tensor, H2D/D2H, or Qwen3.5-9B text) -- **superseded 2026-10-16**: the torch214 env's liger-kernel `0.8.4` now also attaches to the activation checkpoint workload on Qwen3.5-9B text (`job-20261016T162911Z`); model-tensor and H2D/D2H remain unaffected.
 
-**Publish bar:** Arc Pro B70 + H200 + **Ascend 910B4** (GH200 optional as of 2026-10-20) for model-tensor and activation checkpoint on **Qwen3**; saved-activation blocks on H200 Qwen3-8B (GH200 optional), on B70, and on Ascend 910B4 (collected). **Qwen3.5 is a publish gate, own chart** (H200 Qwen3.5-9B rows all collected). GeForce was dropped from the blog (2026-10-20). **Not met** — H200 Qwen3 rows, Ascend 910B4 Qwen3-4B rows, and GH200 H2D/D2H, activation checkpoint, and saved-activation rows are collected. B70 model-tensor is missing (GH200 model-tensor is optional). **Note (2026-10-11):** the H200 saved-activation row below was collected under the old narrow (MLP-only) `--offload-modules` scope and the old `--offload-tensors` 1/2/3 cap; the scope was since widened to the whole decoder layer (see `SAVED_ACTIVATION_OFFLOAD_PLAN.md` §6) and K-capping was found to be a negative result. The widened-scope `--credits`=1 data (`job-20261011T171729Z`) is now the dataset of record for this row; **confirmed 2026-10-20** as the published H200 figure, and `BLOG_PLAN.md` now specifies these settings (`N=1`, `M=2`, `--offload-tensors -1`), so this row is met.
+**Publish bar:** Arc Pro B60 + H200 + **Ascend 910B4** (GH200 optional as of 2026-10-20) for model-tensor and activation checkpoint on **Qwen3**; saved-activation blocks on H200 Qwen3-8B (GH200 optional), on B60, and on Ascend 910B4 (collected). **Qwen3.5 is a publish gate, own chart** (H200 Qwen3.5-9B rows all collected). GeForce was dropped from the blog (2026-10-20). **Not met** — H200 Qwen3 rows, Ascend 910B4 Qwen3-4B rows, and GH200 H2D/D2H, activation checkpoint, and saved-activation rows are collected. B60 model-tensor is missing (GH200 model-tensor is optional). **Note (2026-10-11):** the H200 saved-activation row below was collected under the old narrow (MLP-only) `--offload-modules` scope and the old `--offload-tensors` 1/2/3 cap; the scope was since widened to the whole decoder layer (see `SAVED_ACTIVATION_OFFLOAD_PLAN.md` §6) and K-capping was found to be a negative result. The widened-scope `--credits`=1 data (`job-20261011T171729Z`) is now the dataset of record for this row; **confirmed 2026-10-20** as the published H200 figure, and `BLOG_PLAN.md` now specifies these settings (`N=1`, `M=2`, `--offload-tensors -1`), so this row is met.
 
 ### H200 workloads to be published (summary table)
 
@@ -269,7 +269,9 @@ Stale RTD (`docs/code-docs/source/memory.rst` still describing native as mlock-o
 
 Environment: single Ascend 910B4, **29.5 GiB HBM** (32 GiB physical, ~2.5 GiB firmware-reserved); Kunpeng-920 host, 42-core container CPU quota.
 
-**Resolved (2026-10-21):** saved-activation offload is accelerator-agnostic in DeepSpeedExamples (DeepSpeed accelerator abstraction), so it runs on CUDA, XPU, and Ascend NPU. Ascend 910B4 (1.14×, Qwen3-4B batch 1 × seq 2048) is a required, collected row, and B70 saved-activation is now required. `BLOG_PLAN.md` is updated; `LAYOUT.md` may still carry the old CUDA-only language.
+**Rerun required (2026-11-05):** the blog publishes **bound** Ascend numbers. Re-run every row above (Qwen3 and Qwen3.5) under `numactl --cpunodebind=<NPU node> --preferred=<NPU node>` (npu `run.sh` with `NUMA_NODE=<n>`), and record `kernel.numa_balancing`, `ulimit -l`, and the node. Re-run H2D/D2H with host buffers written before timing (current `h2d_d2h/bench.py` default; never `--no-touch`); the 6.48 GB/s pageable H2D above is not confirmed to be a written buffer. If the 4K-vs-2M pageable H2D result (~6.4 vs ~23 GB/s) is to be cited, re-measure it the same way (§2a Rules 1–4).
+
+**Resolved (2026-10-21):** saved-activation offload is accelerator-agnostic in DeepSpeedExamples (DeepSpeed accelerator abstraction), so it runs on CUDA, XPU, and Ascend NPU. Ascend 910B4 (1.14×, Qwen3-4B batch 1 × seq 2048) is a required, collected row, and B60 saved-activation is now required. `BLOG_PLAN.md` is updated; `LAYOUT.md` may still carry the old CUDA-only language.
 
 ### H200 headline results (quick reference)
 
@@ -338,10 +340,10 @@ Published (unbound, `20261011T171729Z`): 3.08x / 4.24x / 4.36x. The pattern matc
 
 | Row | Status | Evidence |
 |-----|--------|----------|
-| Model-tensor Qwen3, B70 | missing | — |
-| Activation checkpoint workload, Qwen3, B70 (or engine miss: commit + error) | missing | — |
-| H2D/D2H B70 `--skip-native-register` | missing | — |
-| Saved-activation, Qwen3, B70 (or engine miss: commit + error) | missing | Same ID as B70 model-tensor, batch 1 × seq 2048, `--offload-optimizer --act-mem-opt --offload-tensors -1 --credits 1 --prefetch 2`. Required as of 2026-10-21. |
+| Model-tensor Qwen3, B60 | missing | — |
+| Activation checkpoint workload, Qwen3, B60 (or engine miss: commit + error) | missing | — |
+| H2D/D2H B60 `--skip-native-register` | missing | — |
+| Saved-activation, Qwen3, B60 (or engine miss: commit + error) | missing | Same ID as B60 model-tensor, batch 1 × seq 2048, `--offload-optimizer --act-mem-opt --offload-tensors -1 --credits 1 --prefetch 2`. Required as of 2026-10-21. |
 | Model-tensor Qwen3-8B, H200 | **have (headline, per BLOG_PLAN.md's required-SKU table)** | `job-20260928T140704Z` (steps=10, cleaner sample; supersedes steps=4 `job-20260928T131344Z`). ZeRO-3 param+optim CPU offload, batch 1 × seq 4096 (realistic context, supersedes the earlier seq-512 shape). 13.583→3.998 s (**3.40×**, 302→1025 tok/s), CPU 137.31 GB, GPU 38.88 GB. Speedup is stable/mildly increasing across seqlen — same job also ran seq 2048 (2.90×, steps=10); earlier steps=4 runs (seq 4096 3.26×, seq 2048 2.82×, and the original `job-20260925T223201Z` seq 512 2.89×) land in the same ~2.8–3.4× band. Pinned step time stays ~flat (~4.0 s) across shapes while unpinned scales with seqlen, consistent with the gap being driven by per-layer weight-gather transfer, not compute. Re-run on 2026-10-12 (no new flags) landed at ~2.8-2.96x instead of 3.40x — isolated to environmental drift on the shared node, not a code regression (see new section below), so 3.40x is kept here as a valid historical snapshot. |
 | Model-tensor Qwen3-4B/8B + act-mem-opt, H200 | **have (secondary capability aside, not headline)** | New capability: `--act-mem-opt`/`--tiled-mlp`/`--gradient-checkpointing` added to `model_tensor_offload/bench.py` (default off; existing invocations unaffected). seq=4096 and seq=65536 sweep across Qwen3-4B/8B in "H200 model-tensor offload + act-mem-opt" below. Qwen3-8B stays the required/headline model-tensor figure per BLOG_PLAN.md's required-SKU table; Qwen3-32B was measured (see memory for the raw numbers) but dropped from blog messaging. |
 | Activation checkpoint workload, Qwen3-8B, H200 | **have** | `job-20260926T165140Z` exit 0. Pitch: **64K capability**. Batch 1. Liger + TiledMLP + fused linear CE. At 64K: 29.990 → 25.303 s (**1.19×**, 44.66 GB, 17.5 GB act DMA). |
@@ -356,7 +358,7 @@ Published (unbound, `20261011T171729Z`): 3.08x / 4.24x / 4.36x. The pattern matc
 | Model-tensor Qwen3-4B, Ascend 910B4 | **have** | Single Ascend 910B4, 29.5 GiB HBM usable (32 GiB physical). ZeRO-3 CPU param+optim. Batch 1 × seq 1024: **1.85×** (21.26→11.48 s, 48→89 tok/s). Batch 1 × seq 2048: **1.47×** (19.32→13.16 s, 106→156 tok/s). Source table has no job id. Seq 2048 unpinned step time is lower than seq 1024; report the table as measured. |
 | Activation checkpoint workload, Qwen3-4B, Ascend 910B4 | **have** | ZeRO-2 CPU AdamW + Liger/TiledMLP. Batch 1 × seq 8192: **1.23×** (15.44→12.60 s). |
 | Activation checkpoint workload, Qwen3.5-4B, Ascend 910B4 | have (required, own chart) | ZeRO-2 CPU AdamW + Liger fused-linear-CE + TiledMLP + fused CE (recipe C). Batch 1 × seq 8192: **1.08×** (92.58→85.85 s). Different architecture from Qwen3-4B (table labels 4.2B vs 4.0B). Keep off the Qwen3 chart. |
-| H2D/D2H, Ascend 910B4 | **have** | 256 MiB, native-registered vs pageable. H2D **4.01×** (6.48→25.97 GB/s). D2H **3.95×** (6.71→26.49 GB/s). Not `cudaHostRegister` and not the B70 Torch/XPU arm. Do not plot next to H200. |
+| H2D/D2H, Ascend 910B4 | **have** | 256 MiB, native-registered vs pageable. H2D **4.01×** (6.48→25.97 GB/s). D2H **3.95×** (6.71→26.49 GB/s). Not `cudaHostRegister` and not the B60 Torch/XPU arm. Do not plot next to H200. |
 | Saved-activation, Qwen3-4B, Ascend 910B4 | **have (2026-10-16, supersedes prior named-limitation status)** | Credit-bounded saved-tensor-hook offload, no rematerialization, widened whole-decoder-layer scope, `--credits 1`, ZeRO-2 CPU AdamW. Batch 1 x seq 2048: **1.14x** (9.48->8.34 s). Source table has no job id. |
 | Model-tensor, GH200 | missing | Not in `ds-pin-Xinyu-experiment.pdf`. Optional as of 2026-10-20; does not block publish. |
 | H2D/D2H, GH200 | **have** | `galleon` GPU0, node 0, 256 MiB chart (`ds-pin-Xinyu-experiment.pdf` p.18). H2D GB/s pageable / native-unregistered / torch / native-registered: 4 MiB 196 / 189 / 262 / 294; 64 MiB 360 / 337 / 370 / 355; 256 MiB 366 / 358 / 383 / 357. D2H: 4 MiB 180 / 181 / 263 / 263; 64 MiB 284 / 285 / 295 / 295; 256 MiB 293 / 294 / 297 / 297. Large copies differ by under 4%. At 4 MiB, pinned is 1.3–1.5×. mlock-only tracks pageable. Separate nsys point (p.19, 256 MiB): H2D pageable/pinned 351/350, D2H 296/297; single-thread CPU copy 14.6 GB/s; pageable sometimes stalls 4–20 ms. Do not plot next to H200. |
@@ -440,7 +442,7 @@ tradeoff for the writeup, not a bug.
 
 **Decision (2026-10-12), after reading `BLOG_PLAN.md` in full:** keep **Qwen3-8B** as the published
 model-tensor headline (quick-reference table above). `BLOG_PLAN.md`'s "Required to publish" table
-explicitly pins the high-end-CUDA model-tensor row to Qwen3-8B (or 4B), and the B70 rows can
+explicitly pins the high-end-CUDA model-tensor row to Qwen3-8B (or 4B), and the B60 rows can
 only ever use small IDs (0.6B/1.7B) — so a 32B figure has no cross-SKU partner and would orphan the
 required three-SKU pin-vs-pageable comparison the blog is built around. **Qwen3-32B dropped from blog
 messaging entirely (2026-10-12)** — the act-mem-opt capability story above now stays scoped to
@@ -569,13 +571,13 @@ Under `numactl --membind=all`, every arm has 0 faults/step and ~0 sys time. The 
 
 - Qwen3 and Qwen3.5 are both published. Qwen3.5 always goes on its own chart, never next to Qwen3.
 - Model-tensor, activation checkpoint, and saved-activation get equal visual weight, different axes.
-- H200 GB/s is supporting only; do not plot next to B70, Ascend, or GH200.
+- H200 GB/s is supporting only; do not plot next to B60, Ascend, or GH200.
 - #8282 is async vs blocking (both pinned). #8283 GB/s was remeasured with a pageable arm here.
-- Next: B70 activation checkpoint workload + model-tensor + H2D/D2H + saved-activation, (GH200 model-tensor optional). All H200 rows (Qwen3 and Qwen3.5-9B) are collected. Ascend 910B4 Qwen3-4B rows are collected. GH200 H2D/D2H, activation checkpoint, and saved-activation are collected. Do not start `README.md` until B70 model-tensor exists, and B70 saved-activation exist (or B70 activation/saved-activation are named limitations).
+- Next: B60 activation checkpoint workload + model-tensor + H2D/D2H + saved-activation, (GH200 model-tensor optional). All H200 rows (Qwen3 and Qwen3.5-9B) are collected. Ascend 910B4 Qwen3-4B rows are collected. GH200 H2D/D2H, activation checkpoint, and saved-activation are collected. Do not start `README.md` until B60 model-tensor exists, and B60 saved-activation exist (or B60 activation/saved-activation are named limitations).
 
 ### Application (3): saved-activation offload (credit-bounded, no remat) — 2026-09-27/28
 
-Separate algorithm from `activation_offload/` above (checkpoint hidden states with remat). Full spec in `SAVED_ACTIVATION_OFFLOAD_PLAN.md`. **Peer publish application.** Published H200 rows are ZeRO-2 CPU AdamW, widened scope, `--credits 1` (`job-20261011T171729Z` for Qwen3-8B, `job-20261107T202125Z` for Qwen3.5-9B). The narrow-scope `job-20261007T215537Z` K-sweep below is history. Momentum-free SGD is diagnostic only. Ascend 910B4 and B70 are required (accelerator-agnostic script).
+Separate algorithm from `activation_offload/` above (checkpoint hidden states with remat). Full spec in `SAVED_ACTIVATION_OFFLOAD_PLAN.md`. **Peer publish application.** Published H200 rows are ZeRO-2 CPU AdamW, widened scope, `--credits 1` (`job-20261011T171729Z` for Qwen3-8B, `job-20261107T202125Z` for Qwen3.5-9B). The narrow-scope `job-20261007T215537Z` K-sweep below is history. Momentum-free SGD is diagnostic only. Ascend 910B4 and B60 are required (accelerator-agnostic script).
 
 **Phase 2/3 n-sweep validation (`--n-sweep`, N={1,2,4}, K=3, batch 1 × seq 2048):** withdrawn. The results could not be traced to a source job and need a re-run before any claim about credit backpressure is made.
 
@@ -620,7 +622,7 @@ The SGD sweep above only located the feasible ceilings. **Published K-sweep** is
 
 All 15 passing Adam arms `pin_separated=true`. Speedup stays near **2×** as K grows: the CPU Adam step is in both arms, so extra activation bytes move `r` but add little wall-time ratio. Do not quote the SGD 3.52× / 2.30× figures as this result. Do not plot 8B-at-4096 next to 9B-at-2048 as one comparison. seq=1024 Adam rows are in `job-20261007T215537Z.log`.
 
-**SKU split:** H200, Ascend 910B4, and B70 are publish gates (above); GH200 is optional.
+**SKU split:** H200, Ascend 910B4, and B60 are publish gates (above); GH200 is optional.
 
 #### Widened scope, seq-extrapolated discovery, k/credits ablations (H200, `job-20261011T171729Z`) — 2026-10-11
 

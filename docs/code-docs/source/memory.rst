@@ -339,10 +339,11 @@ Whether to pin and how to pin are orthogonal:
 * **How:** ``DS_PIN_MEMORY_BACKEND=torch|native`` (environment only; not a
   ``ds_config`` field). Every call site that pins through
   ``get_accelerator().pin_memory()`` honors this env var, including ZeRO
-  CPU-offload buffers and eager activation checkpoint offload. Keep the default
-  ``torch`` backend for activation offload: ``native`` is ``mlock`` without
-  ``cudaHostRegister``, so its host buffers are not registered for accelerator
-  DMA and the offload's async copies can still block. DeepCompile activation
+  CPU-offload buffers and eager activation checkpoint offload. Either backend
+  supports async DMA on accelerators that can register host memory (see
+  :ref:`native-device-registration`). On accelerators without a registration
+  hook, ``native`` buffers are ``mlock``-only, so async copies from them can
+  still block; keep the default ``torch`` backend there. DeepCompile activation
   offload pins with ATen ``pinned_memory`` and does **not** use
   ``DS_PIN_MEMORY_BACKEND``.
 
@@ -360,10 +361,14 @@ no ``ds_config`` field for the backend.
 
 The ``torch`` backend page-locks host memory for **accelerator DMA**
 (``cudaHostRegister`` / device-specific pin). The ``native`` backend
-page-locks via ``posix_memalign`` + ``mlock`` for AIO/GDS (DeepNVMe can
-skip bounce buffers) and does **not** register the allocation with CUDA/XPU,
-so async GPU copies to native-pinned tensors can still block. Both are
-counted by ``track_pinned_memory`` when pages are actually locked. Differences:
+page-locks via ``posix_memalign`` + ``mlock`` and then registers the
+allocation with the device runtime when the accelerator provides a
+registration hook (CUDA, Ascend NPU, and SUPA; not XPU). Once registered,
+native buffers reach the same H2D/D2H bandwidth as ``torch`` pinned memory.
+Unregistered native buffers (no hook, or ``DS_PIN_MEMORY_REGISTER_DEVICE=0``)
+stay locked for CPU and AIO use, but device copies from them run at pageable
+speed and async copies can block. Both are counted by
+``track_pinned_memory`` when pages are actually locked. Differences:
 
 .. list-table:: Differences between ``torch`` and ``native`` pin backends
    :header-rows: 1
@@ -407,6 +412,8 @@ Example:
 
     export DS_PIN_MEMORY_BACKEND=native
     deepspeed train.py ...
+
+.. _native-device-registration:
 
 Native device registration
 ==========================

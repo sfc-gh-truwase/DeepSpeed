@@ -1,0 +1,370 @@
+<!--
+EDITOR NOTES (not rendered). Draft of 2026-11-05. Headings and conventions follow LAYOUT.md: Qwen3.5 sits in each
+workload section in its own table and chart; the activation workloads print only the longest sequence per machine
+(shorter rows are kept in HTML comments); benchmark commands are in the closing appendix.
+
+Blocks publish:
+- Intel Arc Pro B60 (confirmed SKU): model-tensor, activation checkpoint, saved-activation, H2D/D2H, and Qwen3.5 rows are not collected.
+  If the activation engine does not run on stock PyTorch XPU, the activation checkpoint section must open with the commit and error.
+- Ascend 910B4: every row (Qwen3 and Qwen3.5) will be replaced by a run bound to the NPU's NUMA node.
+  The Ascend numbers below are the earlier unbound collection and are placeholders until then.
+- Ascend H2D/D2H will be re-run with host buffers written before timing; the Ascend page-size sentence waits on the same rerun.
+- H200 Qwen3.5-9B rows are unbound; the provisional caveats stay unless they are re-run bound.
+- H200 Qwen3.5-9B saved-activation 64K, bound (2026-11-07 rerun): 108.53 s pageable, 29.08 s pinned, 3.73×.
+- Ascend Qwen3.5-4B saved-activation row is not collected.
+- Setup table: DeepSpeed commit per SKU, and Ascend ulimit -l / numa_balancing / node, are missing.
+- media/ figures not generated; placeholders mark where each goes.
+- Contributors list is a placeholder.
+
+Unbound H200 history (do not print as current): MT 3.40x (job-20260928T140704Z), ACT 64K 1.19x (job-20260926T165140Z),
+SAO 64K 3.80x (job-20261011T171729Z).
+-->
+
+# Pinned Host Memory for CPU Offload: A Practitioner Guide
+
+## Introduction
+
+### CPU offload for cost-efficiency and capability
+
+CPU offload trades accelerator memory for host memory. It lets a smaller or cheaper card train a model that would not otherwise fit, and lets a datacenter GPU train sequences far longer than its memory alone allows. The price is traffic: every offloaded byte crosses the host–device link at least twice per step.
+
+### Three applications: model tensors, checkpoint activations, and saved activations
+
+Offload is not one technique. We study three, which are independent and can be combined in one job:
+
+1. **Model-tensor offload.** Parameters and optimizer states live in host memory and are copied to the device as each layer needs them.
+2. **Activation checkpoint offload.** With activation checkpointing, only each layer's input is kept for the backward pass and everything else is recomputed. Those inputs go to the host during the forward pass and come back for recomputation. Our workload combines this with CPU optimizer offload and memory-saving kernels, a realistic recipe for long-sequence training.
+3. **Saved-activation offload.** Every tensor autograd saves inside each decoder layer goes to the host and comes back, with nothing recomputed. It moves far more data than checkpoint offload, in exchange for skipping the second forward pass.
+
+### Pin vs pageable as system efficiency
+
+All three move data over the same link, and for all three the host side of each copy is either ordinary **pageable** memory or **pinned** memory: page-locked and registered with the device driver. Pinning makes a copy *eligible* for direct memory access (DMA) and for overlap with compute. Whether that shortens a training step depends on how much of the step is copying, which is what we measured.
+
+### What this post covers (evaluations, APIs, frameworks, best practices)
+
+We measured pinned against pageable host memory end to end, for all three applications, on Hugging Face Qwen3 models. The headline:
+
+<!-- FIGURE: media/summary.png — pin speedup by workload, one panel per machine (pageable = 1.0). -->
+
+| Application | NVIDIA H200, Qwen3-8B | Ascend 910B4, Qwen3-4B | Intel Arc Pro B60 |
+|-------------|-----------------------|------------------------|-------------------|
+| Model-tensor offload | **2.82×** at 4K tokens | **1.85×** at 1K, **1.47×** at 2K | <!-- TODO --> |
+| Activation checkpoint offload | **1.13×** at 64K | **1.23×** at 8K | <!-- TODO --> |
+| Saved-activation offload | **2.74×** at 64K | **1.14×** at 2K | <!-- TODO --> |
+| Host-to-device copy bandwidth | **5.4×** | **4.0×** | <!-- TODO --> |
+
+<!-- TODO: Ascend column from the bound, written-buffer rerun. TODO: B60 column. -->
+
+Speedup is the pageable step time divided by the pinned step time, for the same model, batch, and sequence length on the same machine. Activation rows are at the longest sequence each machine ran. Columns use different models and sequence lengths, so compare within a column, not across.
+
+- **Pinning sped up every workload we measured,** by 1.13× to 2.74× on Qwen3 (bound). On the hybrid Qwen3.5 architecture, the bound gains were 2.43× to 3.73×; unbound, 2.42× to 5.41×.
+- **Copy bandwidth does not predict step time.** On the H200, a 5.4× faster copy became anywhere from a 1.13× to a 2.74× faster Qwen3 step. The gain follows how much of the step is spent copying.
+- **Registration, not page-locking, makes host memory fast.** Locked-but-unregistered memory copies at pageable speed.
+- **Pageable runs are sensitive to placement; pinned runs are not.** Without NUMA binding, the same comparison overstated the pin speedup by up to 1.6×.
+
+After the evaluation, we cover the pinning APIs in PyTorch, Hugging Face, and DeepSpeed, and the practices that follow from the measurements. The short version: **keep pinning on unless host RAM or the locked-memory limit is tight, and measure again on a new host link.**
+
+## Background: why pin can change offload efficiency
+
+A device's copy engine can only read host memory that will not move. Making memory usable for DMA takes two steps: **page-locking** it so the OS cannot move or swap it, and **registering** it with the device driver so the copy engine can address it (`cudaHostRegister` on CUDA, `aclrtHostRegisterV2` on Ascend). Locking alone is not enough. On the H200, memory that DeepSpeed had locked but not registered copied at 10.2 GB/s, the same as pageable memory.
+
+Pinning makes overlap possible; it does not guarantee it. To see the difference, we issued a 256 MiB host-to-device copy with `non_blocking=True` on the H200, alongside a ~10.9 ms matrix multiply on another stream:
+
+| Host buffer | Time for the copy call to return | Copy + matrix multiply, wall time |
+|-------------|----------------------------------|-----------------------------------|
+| Pageable | 27.9 ms | 27.9 ms |
+| Pinned | 0.017 ms | 11.25 ms |
+
+The pageable copy blocked the calling thread for the entire transfer, even though it was requested as non-blocking, so nothing launched after it could start. The pinned copy returned at once and hid behind the compute.
+
+Why pageable copies are slower depends on the driver:
+
+- **CUDA (measured on the H200).** The driver stages pageable data through its own pinned buffer, using CPU threads, while the issuing thread waits. A system-call probe found no per-copy `mlock`, `ioctl`, or `mmap` difference between pageable and pinned copies, and 2 MiB host pages left pageable bandwidth within noise. Because the staging runs on CPU threads, pageable copies are sensitive to where those threads run.
+- **Ascend (reported by the driver team, not measured by us).** Pageable memory is pinned and its device page tables are built on every copy, and asynchronous copies from pageable memory become synchronous.
+- **Intel XPU.** We have not characterized the pageable path.
+
+## Real-world evaluation
+
+The three applications get equal weight. Each section leads with end-to-end step time; the copy microbenchmark follows as supporting evidence.
+
+### Setup (Qwen3; host RAM)
+
+All end-to-end runs use Hugging Face models built from their configs with random weights, batch 1, bf16. Each workload section reports two architectures in separate tables. **Qwen3** is dense, with full attention in every layer. **Qwen3.5** interleaves linear-attention (Gated DeltaNet) layers with full-attention layers, so its compute and activation profile differs: it is not a bigger Qwen3. Model size and sequence length are chosen per machine to fit its device and host memory, so ratios compare within a machine and architecture, not across.
+
+| | NVIDIA H200 | Ascend 910B4 | Intel Arc Pro B60 |
+|--|-------------|--------------|-------------------|
+| Devices used | 1 GPU of 8 | 1 NPU | 1 GPU <!-- TODO --> |
+| Device memory | 141 GB HBM3e | 29.5 GiB usable (32 GiB physical) | 24 GB |
+| Host CPU | 2× Xeon 8488C, 192 CPUs, 2 NUMA nodes | Kunpeng-920, 42-core container quota | <!-- TODO --> |
+| Host–device link | PCIe Gen5 | Ascend host link | PCIe <!-- TODO: generation --> |
+| Software | PyTorch 2.14.0+cu130, Transformers 5.16.0.dev0, flash-attn 2.8.3, Liger kernel 0.8.4 | PyTorch with `torch_npu` <!-- TODO: versions --> | Stock PyTorch `xpu` (2.8+) <!-- TODO: versions --> |
+| DeepSpeed commit | <!-- TODO (>= #8283) --> | <!-- TODO --> | <!-- TODO --> |
+| `ulimit -l` | unlimited | <!-- TODO --> | <!-- TODO --> |
+| `kernel.numa_balancing` | 1 | <!-- TODO --> | <!-- TODO --> |
+| Launch | `numactl --cpunodebind=0 --preferred=0` | `numactl --cpunodebind=<n> --preferred=<n>` <!-- TODO: node --> | <!-- TODO --> |
+| Models | Qwen3-8B, Qwen3.5-9B | Qwen3-4B, Qwen3.5-4B | <!-- TODO: Qwen3-0.6B or 1.7B; Qwen3.5-0.8B or 2B --> |
+
+Host RAM, not device memory, is often the limit for model-tensor offload. On the H200, Qwen3-8B with `zero.Init` kept 137 GB of offloaded state in host memory. Without `zero.Init`, plan on about 27 bytes of host memory per parameter (18 bytes of state, times 1.5 for buffers), about 206 GiB for Qwen3-8B. Pinning that much also needs `ulimit -l` raised to cover it.
+
+### Method: written buffers, bound placement, step counts
+
+The pinned arm uses DeepSpeed's native backend with device registration on CUDA and Ascend, except the Ascend activation checkpoint rows, which use PyTorch's NPU pinned allocator. XPU also uses PyTorch's pinned allocator, because DeepSpeed has no XPU registration hook. The pageable arm sets `pin_memory` to `false`. Each arm runs in a fresh process, for at least 10 steps. Three rules keep the comparison honest:
+
+- **Write host buffers before timing.** A never-written buffer maps to the kernel's shared zero page, which inflates pageable bandwidth: 20.8 GB/s instead of 10.1 GB/s host to device on the H200.
+- **Bind to the accelerator's NUMA node.** Every Qwen3 run is launched with `numactl --cpunodebind=<n> --preferred=<n>`, which also turns off automatic NUMA balancing for the process.
+- **Compare within one machine, one page size, and one placement.**
+
+Binding matters because the pageable arm is the noisy one. On the same H200 host and day, unbound runs inflated every pin speedup:
+
+| Application | Unbound | Bound |
+|-------------|---------|-------|
+| Model-tensor, 4K | 2.90× | **2.82×** |
+| Activation checkpoint, 64K | 1.25× | **1.13×** |
+| Saved-activation, 64K | 3.85× | **2.74×** |
+
+Between unbound and bound runs, pinned saved-activation step times moved 4–8%, while pageable ones moved 16–38%. Unbound, the same 8K saved-activation command measured 3.08× in one run and 3.60× in another; bound, run-to-run spread was at most 0.37 s. Every H200 Qwen3 number in this post is bound; the H200 Qwen3.5 numbers are not yet, and are marked provisional.
+
+### Model-tensor offload (Arc Pro B60, H200, Ascend 910B4)
+
+<!-- FIGURE: media/model_tensor_qwen3.png — one panel per machine, pageable = 1.0. -->
+
+**Qwen3**
+
+| Machine | Model, sequence length | Pageable step | Pinned step | Speedup |
+|---------|------------------------|---------------|-------------|---------|
+| H200 | Qwen3-8B, 4096 | 10.53 s | 3.74 s | **2.82×** |
+| Ascend 910B4 | Qwen3-4B, 1024 | 21.26 s | 11.48 s | **1.85×** |
+| Ascend 910B4 | Qwen3-4B, 2048 | 19.32 s | 13.16 s | **1.47×** |
+| Arc Pro B60 | <!-- TODO --> | | | |
+
+<!-- H200: job-20261024T171244Z, bound. Ascend: TODO bound rerun; in the unbound data, seq 2048 pageable was faster than seq 1024 pageable — check whether that persists. -->
+
+<!-- FIGURE: media/model_tensor_qwen3_5.png — own chart, never beside Qwen3. -->
+
+**Qwen3.5**
+
+| Machine | Model, sequence length | Pageable step | Pinned step | Speedup |
+|---------|------------------------|---------------|-------------|---------|
+| H200 | Qwen3.5-9B, 4096 | 11.36 s | 4.10 s | **2.77×** |
+| Ascend 910B4 | Qwen3.5-4B, 512 | 14.45 s | 10.95 s | **1.32×** |
+| Ascend 910B4 | Qwen3.5-4B, 1024 | 17.95 s | 13.95 s | **1.29×** |
+| Arc Pro B60 | <!-- TODO: Qwen3.5-0.8B or 2B --> | | | |
+
+<!-- H200 Qwen3.5: job-20261016T193445Z, unbound, fla + causal-conv1d installed. Ascend Qwen3.5: TODO bound rerun. -->
+
+With ZeRO-3 CPU offload, every layer's parameters cross the link in every forward and backward pass, whatever the sequence length. On the H200 that transfer dominates the pageable step, and pinning turns a transfer-bound step into one close to compute-bound: about 3× on both architectures, as expected when parameter traffic, not the attention design, sets the step time. The Ascend gains are smaller but still substantial.
+
+### Activation checkpoint workload (same hardware and families)
+
+<!-- If the B60 activation engine does not run on stock PyTorch XPU, open this section with the commit and the error. -->
+
+Each row is the longest sequence we ran on that machine.
+
+<!-- FIGURE: media/activation_checkpoint_qwen3.png — one panel per machine, pageable = 1.0. -->
+
+**Qwen3**
+
+| Machine | Model, sequence length | Pageable step | Pinned step | Speedup |
+|---------|------------------------|---------------|-------------|---------|
+| H200 | Qwen3-8B, 64K | 32.60 s | 28.97 s | **1.13×** |
+| Ascend 910B4 | Qwen3-4B, 8K | 15.44 s | 12.60 s | **1.23×** |
+| Arc Pro B60 | <!-- TODO --> | | | |
+
+<!-- H200 64K: job-20261024T171244Z, bound. Peak device memory 44.7 GB (job-20260926T165140Z), cited in prose. Shorter H200 rows (not printed): 8K 7.03 -> 4.30 s, 1.63x, job-20261027T132751Z. Ascend: TODO bound rerun. -->
+
+<!-- FIGURE: media/activation_checkpoint_qwen3_5.png — own chart, never beside Qwen3. -->
+
+**Qwen3.5**
+
+| Machine | Model, sequence length | Pageable step | Pinned step | Speedup |
+|---------|------------------------|---------------|-------------|---------|
+| H200 | Qwen3.5-9B, 64K | 20.81 s | 16.67 s | **1.25×** |
+| Ascend 910B4 | Qwen3.5-4B, 8K | 92.58 s | 85.85 s | **1.08×** |
+| Arc Pro B60 | <!-- TODO: Qwen3.5-0.8B or 2B --> | | | |
+
+<!-- H200 Qwen3.5: job-20261016T193445Z, unbound. Peak device memory 55.7 GB, cited in prose. Shorter H200 rows (not printed): 8K/16K/32K 1.85x/1.80x/1.52x.
+Ascend Qwen3.5-4B is ~6x slower per step than Qwen3-4B at the same length; check that fla + causal-conv1d kernels were active (the same missing-package fallback made H200 Qwen3.5 ~8x slower before job-20261016T193445Z). TODO bound rerun. -->
+
+Copies stay asynchronous in both arms; pinning applies to the activation pool and to the CPU optimizer's host buffers together. This section claims copy cost, not capacity: plain checkpointing without offload also runs Qwen3-8B at 64K, 96K and 128K on the H200. At that length the pinning gain is modest, because checkpoint offload copies only one tensor per layer: copy volume grows linearly with sequence length while attention compute grows faster, so by 64K the copies are a small part of the step. Binding cut the Qwen3 gain here from 1.25× to 1.13×. The Qwen3.5 activation-checkpoint rows are unbound only, so their gain is not yet a clean comparison.
+
+This comparison is different from the asynchronous-versus-blocking one in [#8282](https://github.com/deepspeedai/DeepSpeed/pull/8282), where both arms are pinned. That measures the value of overlap; this section measures the value of pinning.
+
+<!-- OPTIONAL FIGURE: media/activation_async_vs_blocking.png — #8282 async vs blocking, both pinned; label as a different axis. -->
+
+### Saved-activation offload, no rematerialization (Arc Pro B60, H200, Ascend 910B4)
+
+Each row is the longest sequence we ran on that machine.
+
+<!-- FIGURE: media/saved_activation_qwen3.png — one panel per machine, pageable = 1.0. -->
+
+**Qwen3**
+
+| Machine | Model, sequence length | Pageable step | Pinned step | Speedup |
+|---------|------------------------|---------------|-------------|---------|
+| H200 | Qwen3-8B, 64K | 91.22 s | 33.25 s | **2.74×** |
+| Ascend 910B4 | Qwen3-4B, 2K | 9.48 s | 8.34 s | **1.14×** |
+| Arc Pro B60 | <!-- TODO: Qwen3-0.6B or 1.7B, 2K --> | | | |
+
+<!-- H200 64K: job-20261024T171244Z, bound. Peak device memory 125.1 GB (job-20261011T171729Z), cited in prose. Shorter H200 rows (not printed, bound, job-20261026T133233Z): 8K/16K/32K 3.03x/3.32x/3.25x. Ascend: TODO bound rerun. -->
+
+<!-- FIGURE: media/saved_activation_qwen3_5.png — own chart, never beside Qwen3. -->
+
+**Qwen3.5**
+
+| Machine | Model, sequence length | Pageable step | Pinned step | Speedup |
+|---------|------------------------|---------------|-------------|---------|
+| H200 | Qwen3.5-9B, 64K | 108.53 s | 29.08 s | **3.73×** |
+| Ascend 910B4 | <!-- TODO: Qwen3.5-4B, 2K --> | | | |
+| Arc Pro B60 | <!-- TODO: Qwen3.5-0.8B or 2B --> | | | |
+
+<!-- H200 Qwen3.5: rerun job-20261107T202125Z, bound and unbound (unbound 64K: 5.41x). Peak device memory not re-extracted from the rerun. -->
+
+At most one layer's saved tensors stay on the device during the forward pass, and two layers are prefetched for the backward pass. On the H200, saved-activation offload gains the most from pinning because it copies the most: every saved tensor in every layer, both ways, so its copy volume grows as fast as the activations themselves. On Qwen3.5 the bound gain at 64K is 3.73× (5.41× unbound). One plausible reason is that its linear-attention layers add compute only linearly with length, so copies remain most of the step. Binding lowered every Qwen3 speedup (saved-activation at 64K fell from 3.85× to 2.74×), so the bound Qwen3.5 figure is the one to print. On the Ascend, at a 2K sequence, the Qwen3 gain was only 1.14×.
+
+Pinning is what makes skipping recomputation competitive at all. At 64K on the H200, in the same job, a pageable Qwen3 saved-activation step took 91.5 s, against 30.7 s for pageable checkpoint offload. Pinned, the gap narrows to 32.3 s against 26.8 s. Checkpoint offload remained faster and used far less device memory (44.7 GB against 125.1 GB), and Qwen3.5 shows the same ordering (30.1 s against 16.7 s pinned, from separate jobs). On this machine recomputation is still the better trade; saved-activation offload is the technique whose viability depends most on pinning. At 98K tokens it runs out of device memory on the H200.
+
+### Supporting H2D/D2H microbench
+
+<!-- FIGURE: media/h2d_d2h.png — separate panels per machine; CUDA panel has the Torch vs native parity inset. -->
+
+| Machine | Direction | Pageable | Pinned | Ratio |
+|---------|-----------|----------|--------|-------|
+| H200 | Host to device | 10.2 GB/s | 55.4 GB/s | **5.4×** |
+| H200 | Device to host | 17.3 GB/s | 54.9 GB/s | **3.2×** |
+| Ascend 910B4 | Host to device | 6.48 GB/s | 25.97 GB/s | **4.0×** |
+| Ascend 910B4 | Device to host | 6.71 GB/s | 26.49 GB/s | **3.9×** |
+| Arc Pro B60 | Host to device | <!-- TODO --> | <!-- TODO --> | |
+| Arc Pro B60 | Device to host | <!-- TODO --> | <!-- TODO --> | |
+
+<!-- 256 MiB transfers. H200: job-20261024T171244Z, bound, median of 3. Ascend: native-registered vs pageable; TODO bound, written-buffer rerun. B60: Torch/XPU pin vs pageable. -->
+
+These numbers explain the step-time results but do not predict them: the H200's 5.4× copy speedup became a 1.13× to 2.74× faster Qwen3 step, depending on how much of the step was copying. Each machine's ratio also stands alone, because the link, the driver, and the pageable path differ.
+
+On CUDA, how memory is pinned does not change bandwidth, as long as it is registered. At 256 MiB host to device on the H200 (unbound), PyTorch's pinned memory and DeepSpeed's native registered memory both reached 55.4 GB/s. Native memory locked without registration reached 10.2 GB/s, the same as pageable memory.
+
+<!-- H200 parity inset: job-20261023T131838Z, unbound, 256 MiB H2D/D2H: pageable 10.13/16.38, torch 55.40/54.92, native-unregistered 10.15/16.07, native-registered 55.40/54.93 GB/s. -->
+
+With placement fixed, switching the H200 host from 4 KiB to 2 MiB pages changed the copy speedup by at most 3% (5.43× against 5.26× host to device) and the end-to-end pin speedup of every application by at most 0.08×.
+
+## APIs and popular frameworks
+
+### PyTorch
+
+`Tensor.pin_memory()` returns a pinned copy of a CPU tensor, and `torch.empty(..., pin_memory=True)` allocates one directly. A `copy_(..., non_blocking=True)` or `.to(device, non_blocking=True)` is asynchronous only when the host side is pinned; from pageable memory it blocks, as the probe above shows. Most practitioners first meet pinning as `DataLoader(pin_memory=True)`, which pins input batches; offload applies the same idea to model state and activations.
+
+PyTorch also ships a simple saved-activation offload, `torch.autograd.graph.save_on_cpu()`. Its `pin_memory` argument defaults to `False`, so its copies are pageable unless you opt in.
+
+### Hugging Face checkpoint hooks
+
+With non-reentrant gradient checkpointing (`use_reentrant=False`), the tensors each checkpointed Hugging Face decoder layer saves are visible to `torch.autograd.graph.saved_tensors_hooks`. DeepSpeed's `CheckpointHiddenStatesOffload` is a hook context manager that uses this to offload only the checkpointed hidden-state inputs, asynchronously on a side stream, into a pool of pinned host buffers; every other saved tensor passes through. This is the activation checkpoint workload we measured:
+
+```python
+from deepspeed.runtime.activation_checkpointing.offload_activations import (
+    get_checkpoint_hidden_states_offloading_ctx_manager)
+
+model.gradient_checkpointing_enable(gradient_checkpointing_kwargs={"use_reentrant": False})
+offload = get_checkpoint_hidden_states_offloading_ctx_manager(use_pin_memory=True)
+with offload:
+    loss = model(**batch).loss
+    loss.backward()
+```
+
+The backward pass must run inside the same context as the forward pass. `use_pin_memory` (default `True`) is the pin switch for the activation pool.
+
+### DeepSpeed (model-tensor CPU offload and cpu_checkpointing)
+
+**Model-tensor offload** is ZeRO CPU offload, with a pin switch for each offloaded state. Both default to `true`:
+
+```json
+"zero_optimization": {
+  "stage": 3,
+  "offload_param": {"device": "cpu", "pin_memory": true},
+  "offload_optimizer": {"device": "cpu", "pin_memory": true}
+}
+```
+
+**Activation checkpointing** has two pinned paths. Hugging Face models use the context manager above. DeepSpeed's own checkpointing API offloads checkpoint inputs when `activation_checkpointing.cpu_checkpointing` is `true`. Without `partition_activations`, it uses the same asynchronous engine and pinned pool as the Hugging Face path, and always pins. With `partition_activations`, it falls back to blocking copies.
+
+**Saved-activation offload** has no DeepSpeed configuration field. We measured it with a benchmark built on the same hooks, not a shipping feature.
+
+Code that manages its own host buffers can call `get_accelerator().pin_memory()`, `unpin_memory()`, and `is_pinned()`, which route to whichever pinning backend is active.
+
+### How to pin: Torch or native (parity once registered; when unpin matters)
+
+DeepSpeed has two pinning backends, selected with the `DS_PIN_MEMORY_BACKEND` environment variable. The default is `torch`.
+
+**Torch** uses PyTorch's pinned allocator. It needs an accelerator build of PyTorch. It rounds each request up to a power of two and keeps freed blocks locked in its cache until `_host_emptyCache()`: a 5 GiB request locks 8 GiB, and the 8 GiB stay locked after the tensor is freed.
+
+**Native** (`DS_PIN_MEMORY_BACKEND=native`) allocates exactly the requested size with `posix_memalign`, locks it with `mlock`, then registers it with the device where a registration hook exists (CUDA, Ascend, and SUPA, but not yet XPU). `unpin_memory()` unregisters and unlocks the pages at once; buffers the caller never unpins are freed when garbage-collected. `DS_PIN_MEMORY_REGISTER_DEVICE` (default `1`) controls the registration step; setting it to `0` leaves memory locked but unregistered, which copies at pageable speed. Native buffers are not tracked by PyTorch's stream machinery, so the caller must make sure pending copies finish before unpinning. Native also works on CPU-only hosts, where it locks without registering.
+
+<!-- FIGURE: media/host_footprint.png — 5 GiB requested: Torch 8 GiB, native 5 GiB; after free: Torch 8 GiB until the host cache is emptied, native 0. -->
+
+Once registered, native copies exactly as fast as Torch on CUDA. Native is not a faster copy path. Its value is that it locks only what you asked for and gives it back when you unpin, which matters when the locked footprint approaches the memlock limit or host RAM.
+
+## Best practices
+
+### Independent knobs: offload pin_memory vs use_pin_memory
+
+ZeRO's `offload_*.pin_memory` controls model-tensor buffers; `use_pin_memory` controls the activation checkpoint pool. Both default on, and you can turn one off without touching the other. Neither selects a backend: they decide *whether* to pin, and `DS_PIN_MEMORY_BACKEND` decides *how*. Treat the defaults as a starting point to confirm with a measurement.
+
+### Backend and device register
+
+Keep the default Torch backend unless locked memory is tight. When it is, switch to native for exact-size allocations and explicit release, and leave `DS_PIN_MEMORY_REGISTER_DEVICE` on. On CUDA, registered native memory copies as fast as Torch's. On Ascend, native also registers (`aclrtHostRegisterV2`), but we have not measured parity, and the Ascend activation checkpoint runs used Torch's pinning, which was faster on that host. On XPU, DeepSpeed has no registration hook yet, so use Torch: native would be locked but unregistered, at pageable speed. The H200 results use native with `cudaHostRegister`; the B60 results use Torch's XPU pinning.
+
+### When to disable pin (memlock, host RAM)
+
+Pinned pages cannot be swapped out, and the locked total is capped by `ulimit -l`. Turn pinning off when the offloaded footprint approaches host RAM or that limit, after first trying the native backend to avoid Torch's power-of-two rounding. A small or flat measured speedup is not by itself a reason to disable pinning: a pageable copy still blocks its issuing thread. Results from one machine do not transfer to another.
+
+### Host memory placement: NUMA node, automatic NUMA balancing, page size
+
+**Bind to the accelerator's NUMA node.** Launch single-accelerator offload training under `numactl --cpunodebind=<node> --preferred=<node>`, and bind each rank to its own device's node in multi-rank jobs. On the H200, moving the CPU threads to the far socket slowed a pageable activation checkpoint step from 7.2 s to 10.5 s, but a pinned one only from 4.2 s to 5.5 s. Pageable copies are staged by CPU threads; pinned copies are DMA. Model-tensor offload was insensitive to placement (3.76 s against 3.77 s pinned). On the Ascend, a remote node cost even pinned device-to-host copies about 26%, against at most 6% on the H200, so measure per platform.
+
+**Watch automatic NUMA balancing.** With `kernel.numa_balancing=1`, the kernel samples and migrates pages of every large host buffer each step. Pinning the offload buffers does not prevent this, because DeepSpeed's CPU Adam state is ordinary pageable memory. On the H200 it cost 1.6 to 6.8 million page faults and 10 to 70 CPU-seconds per step, in pinned and pageable runs alike. Any explicit task memory policy, such as the binding above, turns it off for the process.
+
+<!-- FIGURE: media/placement.png — faults per step and step time, unbound vs bound, pinned and pageable arms (H200). -->
+
+**Don't use huge pages as a substitute for pinning.** With placement fixed, 2 MiB pages changed any H200 step time by at most 4% and any end-to-end pin speedup by at most 0.08×. An earlier impression that huge pages helped turned out to be NUMA-balancing noise. The Ascend driver may behave differently: a microbenchmark there showed pageable bandwidth rising sharply on 2 MiB pages, which we have not confirmed end to end. <!-- TODO: keep the Ascend clause only if the written-buffer rerun reproduces it. -->
+
+<!-- FIGURE: media/page_size.png — pin speedup at 4K vs 2M, bound, all H200 workloads (job-20261027T132751Z). -->
+
+## Conclusion
+
+CPU offload buys capacity with host memory, and pinning decides how much speed that capacity costs. On an H200 with Qwen3-8B, pinning made offloaded training steps **1.13× to 2.74× faster**: 2.82× for model-tensor offload, and, at 64K tokens, 2.74× for saved-activation offload and 1.13× for activation checkpoint offload. The hybrid Qwen3.5-9B gained more: up to 3.73× bound (5.41× unbound) for saved-activation offload. On an Ascend 910B4, with smaller models and shorter sequences, pinning helped every workload too, by **1.08× to 1.85×**<!-- TODO: update from bound Ascend rerun; add B60 -->.
+
+Three findings should hold beyond these machines. The benefit of pinning follows how much of the step is spent copying, not raw copy bandwidth. Registration with the device, not page-locking, is what makes host memory fast. And pinned runs are far less sensitive to NUMA placement than pageable ones, so unbound comparisons overstate the gain. Pinning is the right default; the exception is a host where the locked pages do not fit.
+
+Two gaps remain. DeepSpeed does not yet register host memory on Intel XPU, so the native backend there is lock-only. Saved-activation offload is a benchmark, not a configuration option, even though on the H200 it is the application with the most to gain from pinning.
+
+## Contributors
+
+<!-- TODO: contributor list (DeepSpeed, Snowflake, Intel, Huawei Ascend). -->
+
+## Appendix: reproducing the results
+
+<!-- TODO: switch links to deepspeedai/DeepSpeedExamples master once the dev-fork branch merges. -->
+
+All benchmarks are in [DeepSpeedExamples `benchmarks/pin_memory`](https://github.com/sfc-gh-truwase/DeepSpeedExamples/tree/tjruwase/pin-memory-experiments/benchmarks/pin_memory). Each command runs the pinned and pageable arms in separate processes. Run them from that directory, bound to the accelerator's NUMA node:
+
+```bash
+N=$(cat /sys/bus/pci/devices/<gpu BDF>/numa_node)
+BIND="numactl --cpunodebind=$N --preferred=$N"
+
+# Model-tensor offload
+$BIND python model_tensor_offload/bench.py --model Qwen/Qwen3-8B --batch 1 --seq 4096 --steps 10
+
+# Activation checkpoint offload
+$BIND python activation_offload/bench.py --model Qwen/Qwen3-8B --offload-optimizer --act-mem-opt \
+  --batch 1 --seq 65536 --steps 10 --warmup 1
+
+# Saved-activation offload
+$BIND python saved_activation_offload/bench.py --model Qwen/Qwen3-8B --offload-optimizer --act-mem-opt \
+  --offload-tensors -1 --credits 1 --prefetch 2 --batch 1 --seq 65536 --steps 10 --warmup 1 \
+  --discover-calib-seqs 4096 8192
+
+# Copy bandwidth (add --skip-native-register on XPU)
+$BIND python h2d_d2h/bench.py
+```
+
+For Qwen3.5, substitute `--model Qwen/Qwen3.5-9B`; it needs a Transformers release that registers `qwen3_5`, plus the `flash-linear-attention` and `causal-conv1d` packages, without which the linear-attention layers silently fall back to a much slower path. The `cuda/run.sh` launchers for the activation checkpoint and saved-activation workloads run these exact rows with the binding applied (`MODEL=` and `SEQ=` override the model and length), and the `npu/run.sh` launchers run the Ascend rows (set `NUMA_NODE=<n>`).
+
+`--act-mem-opt` enables Liger fused linear cross-entropy and TiledMLP (Liger kernel 0.8.4 or later for Qwen3.5). Pass `--prefetch 2`, `--credits 1`, and `--offload-tensors -1` explicitly: the benchmark's defaults (`1`, `2`, and `3`) differ from the settings these results used. `--discover-calib-seqs` extrapolates the offload plan from two short calibration runs, which keeps discovery itself from running out of memory at 32K and longer. On the H200, the saved-activation settings were chosen by measurement. Offloading only the MLP left attention activations resident and ran out of memory at 16K. Capping tensors per layer raised peak memory. Holding one layer instead of two cut peak memory 8–10% at 32K–64K, with step time within ±2.3%. Prefetching one layer instead of two saved 22% more memory at 64K but slowed the pinned step by 12%.
