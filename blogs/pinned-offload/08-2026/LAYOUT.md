@@ -12,9 +12,9 @@ Headings stay accelerator-neutral. ZeRO and pull-request numbers stay in the bod
 
 ## Introduction
 
-### CPU offload for cost-efficiency and capability
+### CPU offload for cost-efficiency
 
-Offload as a way to run on smaller or cheaper GPUs and to train workloads that would not fit otherwise.
+Offload as a way to run on smaller or cheaper GPUs. Capacity claims need a no-offload baseline that does not fit. The activation rows here do not meet that bar: on H200, plain checkpointing fits at every length measured, up to 128K.
 
 ### Three applications: model tensors, checkpoint activations, and saved activations
 
@@ -50,7 +50,7 @@ Host buffers are written before timing (a never-written pageable buffer reads th
 
 ### Host placement: bound versus unbound (the fair pageable baseline)
 
-On the H200 host, automatic NUMA balancing (`kernel.numa_balancing=1`) moves the pageable arm and leaves the pinned arm nearly unchanged. Unbound pageable times are inflated by balancing and by CPU threads landing on the far socket. Bound (`--cpunodebind` and `--preferred` on the GPU's node) is the best pageable condition we measured, so it is the fair baseline for pinned-versus-pageable. Show the unbound numbers as the cost of leaving placement to the scheduler, not as the pinning result. The bound speedups are smaller, and the post should say so: saved-activation at 64K drops from 4.46× unbound to 2.83× bound, and model-tensor from 2.90× to 2.82×. This is one host with balancing on. Hosts with balancing off, or other GPU-to-CPU topologies, may show less of the gap; the post should record the setting for each machine.
+On the H200 host, automatic NUMA balancing (`kernel.numa_balancing=1`) moves the pageable arm and leaves the pinned arm nearly unchanged. Unbound pageable times are inflated by balancing and by CPU threads landing on the far socket. Bound (`--cpunodebind` and `--preferred` on the GPU's node) is the best pageable condition we measured, so it is the fair baseline for pinned-versus-pageable. Show the unbound numbers as the cost of leaving placement to the scheduler, not as the pinning result. The bound speedups are smaller, and the post should say so: saved-activation at 64K drops from 3.85× unbound to 2.74× bound, and model-tensor from 3.62× to 2.82×. This is one host with balancing on. Hosts with balancing off, or other GPU-to-CPU topologies, may show less of the gap; the post should record the setting for each machine.
 
 ### Model-tensor offload (Arc Pro B60, H200, Ascend 910B4)
 
@@ -125,8 +125,8 @@ Launch CPU-offload training bound to the accelerator’s NUMA node (`numactl --c
 Under `media/`, equal weight for the three wall-time figures, microbench supporting:
 
 - Model-tensor pin versus pageable, one panel per machine (B60, H200, Ascend 910B4). H200 bound: 2.82×.
-- Activation checkpoint pin versus pageable, one panel per machine. H200 bound at 64K: 1.15×.
-- Saved-activation pin versus pageable, one panel per machine. H200 bound at 8K / 16K / 32K / 64K: 3.03× / 3.32× / 3.25× / 2.83×.
+- Activation checkpoint pin versus pageable, one panel per machine. H200 bound at 64K: 1.13×.
+- Saved-activation pin versus pageable, one panel per machine. H200 bound at 8K / 16K / 32K / 64K: 2.98× / 3.26× / 3.17× / 2.74×.
 - H2D/D2H supporting panels: CUDA, B60, Ascend 910B4.
 - Torch versus native host footprint, beside How to pin: 5 GiB requested, 8 GiB Torch, 5 GiB native; after free, Torch still 8 GiB until the host cache is emptied, native at 0.
 - Placement, beside the placement section: faults per step and step time, unbound versus bound, pinned and pageable arms (H200).

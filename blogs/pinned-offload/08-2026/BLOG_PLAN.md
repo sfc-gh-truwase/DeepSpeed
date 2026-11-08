@@ -15,7 +15,7 @@
 
 Do **not** use “DeepSpeed Offload,” “Faster Transfers,” or “Explicit Lifetime Control” in the title. Lifetime/unpin belongs under APIs / best practices. Speedups belong in Evaluation after they are measured.
 
-**Pitch:** CPU offload is a **cost-efficiency** and **capability** tool for deep learning: run on smaller or cheaper GPUs, and train workloads that would not fit otherwise. It has **more than one application**, presented as peers:
+**Pitch:** CPU offload is a **cost-efficiency** tool for deep learning: run on smaller or cheaper GPUs. A capacity claim needs a no-offload baseline that does not fit; none of the activation rows below meets that bar. It has **more than one application**, presented as peers:
 
 1. **Model-tensor offload** — parameters and optimizer states (DeepSpeed ZeRO CPU offload is the mechanism, not the headline). Gradients are the same idea; this post does not measure them.
 2. **Activation checkpoint workload** — checkpoint inputs moved to host during forward, then rematerialized, so long sequences fit. The published workload is that offload together with ZeRO-2 CPU AdamW (`--offload-optimizer`; parameters stay on GPU) and `--act-mem-opt` (Qwen3: Liger fused linear cross-entropy, TiledMLP, and fused cross-entropy). Async copies stay on. Pin on/off moves the activation pool and the optimizer host buffers together. Do **not** call this generic “input offload.”
@@ -32,7 +32,7 @@ This blog is a **practitioner guide**. It should deliver:
 - **Popular frameworks** — three sibling sections: PyTorch, Hugging Face non-reentrant checkpoint hooks, DeepSpeed (model-tensor CPU offload and `cpu_checkpointing`). Do not invent APIs other stacks do not have.
 - **Best practices** — shipping defaults are pin-on; confirm with the e2e numbers. When to turn pin off (memlock / host RAM). Torch vs native (how to pin). Host memory placement (bind to the accelerator’s NUMA node; page size is not a lever on H200). Do not copy one machine’s numbers onto another. A **flat** pin-on/off result on PCIe is publishable.
 
-Cost/capability is **framing**. Pin on/off numbers do not prove “ran on a cheaper GPU.” For activation capability, you may cite #8282’s no-offload vs offload peak/seq arms; do not relabel them as pin vs pageable.
+Cost is **framing**. Pin on/off numbers do not prove “ran on a cheaper GPU.” Activation capacity is not claimed: on H200, plain checkpointing without offload runs Qwen3-8B at 64K (44.8 GB peak), 96K (57.6 GB) and 128K (70.6 GB) with no OOM (job `20260929T152934Z`), so offload does not extend the sequence length. You may cite that no-offload arm and #8282’s peak/seq arms as the baseline; do not relabel them as pin vs pageable.
 
 Native vs Torch is a how-to-pin detail, not the lead. Do not imply native is faster than Torch on CUDA; #8283 is **parity** once registered.
 
@@ -50,7 +50,7 @@ Write for **practitioners** who already offload (or are about to) and need to kn
 
 **Coverage:** every class above runs all three applications and the H2D/D2H microbench. The only permitted gap is a named engine failure on B60 activation (see below).
 
-**Voice:** (1) offload as cost + capability, three peer applications; (2) pin vs non-pin as system efficiency (eligibility, then measured wall time); (3) evaluations, then APIs / frameworks, then best practices. **Article order is not collection order.** Do not open as “ZeRO offload, plus a note on activations.”
+**Voice:** (1) offload as cost, with capability only where a no-offload run does not fit, three peer applications; (2) pin vs non-pin as system efficiency (eligibility, then measured wall time); (3) evaluations, then APIs / frameworks, then best practices. **Article order is not collection order.** Do not open as “ZeRO offload, plus a note on activations.”
 
 **XPU:** not a separate class. **Intel Arc Pro B60** is the required non-NVIDIA PCIe SKU. DeepSpeed XPU is **stock PyTorch** (`xpu`, PyTorch 2.8+), not IPEX ([#7877](https://github.com/deepspeedai/DeepSpeed/pull/7877)). `cudaHostRegister` in #8283 is CUDA-only; B60 pin vs non-pin is Torch/XPU pin vs pageable. Do not advertise a native-registered XPU arm until `register_host_memory` exists.
 
@@ -82,7 +82,7 @@ Config orthogonality (document under Best practices, not as the intro):
 
 ## Narrative arc
 
-1. **Offload as strategy** — Cost-efficiency and capability. Not a ZeRO-only problem.
+1. **Offload as strategy** — Cost-efficiency; capability only where a no-offload run does not fit. Not a ZeRO-only problem.
 2. **Three peer applications** — Model tensors (params + optimizer). Activation checkpoint workload (checkpoint hidden states with remat, ZeRO-2 CPU AdamW, `--act-mem-opt`). Saved activations (whole-decoder-layer saved tensors, no remat). Name all three before DeepSpeed. Independent knobs.
 3. **Pin vs non-pin as system efficiency** — Copies cross the host bus. Device-registered host memory makes DMA/overlap **eligible**; wall time is measured, not assumed. Applies to all three applications.
 4. **What this post gives practitioners** — One-paragraph answer-first (when to pin, when to disable) plus the four deliverables.
@@ -112,17 +112,17 @@ Three workloads, all required (peer applications):
 - **`--offload-tensors -1`, not a 1/2/3 sweep.** Under the whole-layer scope, a K cap *raises* peak HBM: unselected eligible tensors stay resident instead of passing through the bounded credit pool. At K=1, peak HBM went from 54.30 to 83.01 GB at seq 8K, and the run OOMed at 32K (job `20261011T105335Z`). The old MLP-only K=1/2/3 table (job `20261007T215537Z`, seq 4096, 2.00× / 2.09× / 2.20×) is superseded history, not a published row. `r` was a K-sweep metric and is not reported for the published rows.
 - **`--credits 1` (`N=1`), not 2.** `N` bounds how many forward layer-groups are held resident. Offloaded bytes are identical at either setting. `N=1` cuts peak HBM at long sequence and costs no measurable step time:
 
-  | seq | pin speedup (N=1), unbound as published | **pin speedup, bound** | pinned step, bound | peak HBM N=2 → N=1 |
+  | seq | pin speedup (N=1), unbound | **pin speedup, bound** | pinned step, bound | peak HBM N=2 → N=1 |
   |---|---|---|---|---|
-  | 8K | 3.08× | **3.03×** (16.16 → 5.32 s) | 5.32 s | 54.30 → 54.30 GB (no change) |
-  | 16K | 4.24× | **3.32×** (26.47 → 7.98 s) | 7.98 s | 59.44 → 59.44 GB (no change) |
-  | 32K | 4.36× | **3.25×** (47.26 → 14.53 s) | 14.53 s | 82.04 → 75.54 GB (−8%) |
-  | 64K | 3.80× | **2.83×** (91.5 → 32.3 s) | 32.3 s | 138.48 → 125.10 GB (−10%) |
+  | 8K | 3.12× (3.19× repeat) | **2.98×** (16.10 → 5.40 s) | 5.40 s | 54.30 → 54.30 GB (no change) |
+  | 16K | 3.64× | **3.26×** (26.59 → 8.15 s) | 8.15 s | 59.44 → 59.44 GB (no change) |
+  | 32K | 3.92× | **3.17×** (47.46 → 14.99 s) | 14.99 s | 82.04 → 75.54 GB (−8%) |
+  | 64K | 3.85× | **2.74×** (91.22 → 33.25 s) | 33.25 s | 138.48 → 125.10 GB (−10%) |
 
-  These speedups are **unbound** runs (no NUMA policy, balancing on). Bound = `numactl --cpunodebind=0 --preferred=0`, medians. 8K–32K are from `job-20261026T133233Z`; 64K is from `job-20261024T171244Z`, on a different host, so it is comparable within its own row only. Same-host unbound re-runs gave 3.60× / 3.73× / 4.98× / 4.46×, with run-to-run spread up to 5.4 s at 8K. Bound spread was ≤0.37 s. The pinned arm moves 4–8%; the pageable arm moves 16–38%. **Print the bound column.** Its message: pinning gives about 3× at 8K–32K and 2.8× at 64K. The pinned step time at `N=1` is within ±2.3% of `N=2` at every seq. Sources: `N=1` is job `20261011T171729Z` (dataset of record); `N=2` is job `20261011T005859Z`. At seq 8K/16K a different allocation sets the peak, so `N` does not move it.
+  These speedups are from the 2026-11-07 rerun (job `20261107T043012Z`; the saved-activation Qwen3-8B 8K bound row and all Qwen3.5 rows are from `20261107T202125Z`). Bound = `numactl --cpunodebind=0 --preferred=0`; unbound has no NUMA policy and balancing on. Pinned step time at bound is within 3.5% of the earlier published bound times at every seq. Pin speedup is about 3× at 8K–32K and 2.7× at 64K, bound. **Print the bound column.** The peak HBM column is from the original runs; it was not re-extracted from the rerun. The pinned step time at `N=1` is within ±2.3% of `N=2` at every seq. Sources: `N=1` is job `20261011T171729Z` (dataset of record); `N=2` is job `20261011T005859Z`. At seq 8K/16K a different allocation sets the peak, so `N` does not move it.
 - **`--prefetch 2` (`M=2`) kept for the published rows.** `M=1` cuts peak HBM further at 64K (125.10 → 97.88 GB, −22%), but pinned step time rises 12.3% (33.00 → 37.06 s, job `20261018T110757Z`). The pin speedup rises to 4.28× only because the pageable arm slows more. That makes `M=1` a memory-headroom ablation, not the published row. Qwen3.5-9B shows the same pattern: −29% HBM for +4–10% step time.
-- **Ceiling: seq 64K.** At seq 98K the engine runs out of HBM: parameters, optimizer state, and held credit groups together exceed 139.8 GB. This is a real capacity limit, not a discovery artifact. Seq ≥32K uses linearly extrapolated discovery (`--discover-calib-seqs 4096 8192`), validated as an exact match against real discovery at 8K. Calibrated discovery threshold depends on the model: Qwen3-8B needs it at seq ≥32K, Qwen3.5-9B already at seq ≥16K (uncalibrated discovery at 16K exceeds 139.8 GiB before the measured arms run; `job-20261016T141158Z` and `20261105T120256Z` both OOMed there, the calibrated reruns `20261017T235002Z` and `20261105T162755Z` pass).
-- **Qwen3.5-9B** (own chart) uses the same settings, seq 2K–64K. Unbound (`job-20261017T235002Z`): 3.68× / 2.73× / 3.19× / 4.30× / 5.14× / 7.93× at 2K/4K/8K/16K/32K/64K. **Bound** (`20261105T120256Z`, `20261105T162755Z`, repeats `20261105T165925Z`): 2.45× / 2.77× / 3.13× / 3.44× / 3.70× / 3.67× at 2K / 4K / 8K / 16K / 32K / 64K. 8K, 16K and 64K are medians of two repeats; 2K, 4K and 32K are from the first run. The first run's 8K pinned time (4.98 s) did not reproduce (6.14 s in both repeats), so the 8K row uses the repeats.
+- **Ceiling: seq 64K.** At seq 98K the engine runs out of HBM: parameters, optimizer state, and held credit groups together exceed 139.8 GB. This is a real capacity limit, not a discovery artifact. Seq ≥32K uses linearly extrapolated discovery (`--discover-calib-seqs 4096 8192`), validated as an exact match against real discovery at 8K. Calibrated discovery threshold depends on the model: Qwen3-8B needs it at seq ≥32K, Qwen3.5-9B already at seq ≥16K (uncalibrated discovery at 16K exceeds 139.8 GiB before the measured arms run; `job-20261017T153604Z` OOMed there with no calibration flag, and the calibrated rerun `20261107T202125Z` passes at 16K–64K with finite losses).
+- **Qwen3.5-9B** (own chart) uses the same settings, seq 2K–64K, all from job `20261107T202125Z`. Unbound: 2.42× / 2.68× / 3.58× / 3.91× / 4.61× / 5.41× at 2K/4K/8K/16K/32K/64K. **Bound:** 2.43× / 2.72× / 3.10× / 3.45× / 3.72× / 3.73×. The earlier Qwen3.5 rows from NaN-affected jobs are withdrawn: they had NaN losses, and their unbound values differ from the rerun by up to 2.5×.
 
 ### Real-world models (required diversity)
 
@@ -260,7 +260,7 @@ Writer constraints for this script:
 
 ### Figure guidance
 
-- **H200 headline numbers to plot (bound to GPU0's node, `job-20261024T171244Z`):** model-tensor ZeRO-3 seq 4096 **2.82×** (10.46 → 3.71 s); activation checkpoint seq 64K **1.15×** (30.68 → 26.78 s); saved-activation seq 64K **2.83×** (91.5 → 32.3 s). The previously quoted 3.40× / 1.19× / 3.80× were unbound runs on other days. Do not print them as current; at most cite them in a NUMA footnote. State the launch policy in the hardware table.
+- **H200 headline numbers to plot (bound to GPU0's node, jobs `20261107T043012Z` and `20261107T202125Z`):** model-tensor ZeRO-3 seq 4096 **2.82×** (10.53 → 3.74 s); activation checkpoint seq 64K **1.13×** (32.60 → 28.97 s); saved-activation seq 64K **2.74×** (91.22 → 33.25 s). The previously quoted 3.40× / 1.19× / 3.80× were unbound runs on other days. Do not print them as current; at most cite them in a NUMA footnote. State the launch policy in the hardware table.
 - Lead with **wall time**: model-tensor pin vs non-pin (unpinned=1.0), activation-checkpoint pin vs pageable with async on (pageable=1.0), and saved-activation pin vs pageable (pageable=1.0). Equal visual weight. Qwen3.5 figures are required; keep them off the Qwen3 chart.
 - H2D/D2H is a supporting figure. Do not plot 55 GB/s H200 next to B60, or next to Ascend (~26 GB/s). On CUDA, do not give four equal bars to Torch vs native; pin vs pageable is the story, register-parity is an inset. Ascend’s DMA panel is native-registered vs pageable.
 - Optional third activation panel: #8282 async vs blocking (pinned) — different axis.
@@ -272,11 +272,11 @@ Writer constraints for this script:
 ## Claims that need evidence
 
 - Pin vs non-pin wall time for **model-tensor and activation checkpoint** on **Intel Arc Pro B60**, H200, and **Ascend 910B4** (Qwen3-4B), on **Qwen3**.
-- Pin vs non-pin wall time for **saved-activation** on H200, Qwen3-8B, `N=1`, `--offload-tensors -1`, seq 8K/16K/32K/64K (bound: 3.03× / 3.32× / 3.25× / 2.83×; unbound as published: 3.08× / 4.24× / 4.36× / 3.80×). B60: required, numbers pending. Ascend: Qwen3-4B, batch 1, seq 2048, 1.14× (9.48→8.34 s). Qwen3.5 is required, own chart.
+- Pin vs non-pin wall time for **saved-activation** on H200, Qwen3-8B, `N=1`, `--offload-tensors -1`, seq 8K/16K/32K/64K (bound: 2.98× / 3.26× / 3.17× / 2.74×; unbound: 3.12× / 3.64× / 3.92× / 3.85×). B60: required, numbers pending. Ascend: Qwen3-4B, batch 1, seq 2048, 1.14× (9.48→8.34 s). Qwen3.5 is required, own chart.
 - Ascend H2D/D2H: native-registered vs pageable at 256 MiB.
 - Do not present synthetic MLP as a Qwen result.
-- **Bound versus unbound (H200, jobs `20261024T022512Z`, `032725Z`, `171244Z`, `20261027T132751Z`, `20261105T120256Z`):** this is a main effect of the post, not a footnote. Unbound runs on a host with `kernel.numa_balancing=1` inflate the pageable arm: 4K minor faults of 1.6–6.8M per step, pageable saved-activation at 64K 147.9 s unbound against 91.5 s bound, and same-host unbound repeats of published rows differing by up to 0.7×. Pinned times barely change. Pin speedups fall when bound (model-tensor 2.90× → 2.82×, activation checkpoint 64K 1.28× → 1.15×, saved-activation 64K 4.46× → 2.83×, Qwen3.5 saved-activation 64K 7.93× published → 3.68× bound). Bound is the fairest pageable baseline: it is the best pageable placement we measured, and it removes a host-scheduling cost that is not part of pinning. Present bound numbers as the headline, unbound as the cost of default placement, and state the balancing setting per machine. B60 and Ascend have no bound runs yet; do not assume their gap matches H200.
-- **Methodology (H200, jobs `20261024T022512Z`, `114211Z`, `171244Z`, `20261026T133233Z`, `20261027T132751Z`):** every published e2e row is measured bound to the accelerator's NUMA node (`numactl --cpunodebind=<n> --preferred=<n>`, as the `run.sh` scripts do), with host buffers written before timing and at least 10 steps. Unbound runs on `numa_balancing=1` hosts are not reproducible for the pageable arm: same-host unbound re-runs differed from the published unbound figures by up to 0.7× (saved-activation 8K 3.60× vs 3.08×). Bound H200: model-tensor 2.82×, activation checkpoint 64K 1.15×, saved-activation 3.03× / 3.32× / 3.25× / 2.83× at 8K–64K; the published unbound figures were 3.40× / 1.19× / 3.08–4.36× / 3.80×. Pinned times barely change with placement; the pageable arm does. Record `numa_balancing` and the launch policy for every SKU. B60, Ascend, and Qwen3.5 rows have not been re-run bound.
+- **Bound versus unbound (H200, rerun jobs `20261107T043012Z` and `20261107T202125Z`):** this is a main effect of the post, not a footnote. Unbound runs on a host with `kernel.numa_balancing=1` inflate the pageable arm. Bound pin speedups are lower than unbound ones in every row: model-tensor Qwen3-8B seq 4096 3.62× → 2.82×, activation checkpoint 64K 1.25× → 1.13×, saved-activation 64K 3.85× → 2.74×, Qwen3.5 saved-activation 64K 5.41× → 3.73×. Pinned times change by under 10% with placement; the pageable arm changes by 40% or more. Bound is the fairest pageable baseline: it is the best pageable placement we measured. Present bound numbers as the headline, unbound as the cost of default placement, and state the balancing setting per machine. B60 and Ascend have no bound runs yet; do not assume their gap matches H200.
+- **Methodology (H200):** every published e2e row is measured bound to the accelerator's NUMA node (`numactl --cpunodebind=<n> --preferred=<n>`, as the `run.sh` scripts do), with host buffers written before timing, 10 steps, and 1 warmup step. Unbound runs on `numa_balancing=1` hosts are not reproducible for the pageable arm: the earlier unbound Qwen3.5 64K figure (7.93×) differs from the rerun (5.41×) by 2.5×. Rerun, bound: model-tensor 2.82×, activation checkpoint 64K 1.13×, saved-activation 2.98× / 3.26× / 3.17× / 2.74× at 8K–64K. Rerun, unbound: model-tensor 3.62×, activation checkpoint 64K 1.25×, saved-activation 3.12× / 3.64× / 3.92× / 3.85×. **Weight initialization:** until 2026-11-06 the bench built models with uninitialized weights (`no_init_weights()` and no fill). Those runs have losses that are not meaningful, and some have NaN losses. The rows in this draft come from the 2026-11-07 rerun, which fills the weights with a fixed seed. Record `numa_balancing` and the launch policy for every SKU. B60 and Ascend rows have not been re-run bound. Qwen3.5 H200 rows have.
 - Activation checkpoint workload: pin vs pageable **with async on**, `--offload-optimizer --act-mem-opt`. The pin arm moves the activation pool and the optimizer host buffers together. Do not claim pin from #8282 async-vs-blocking.
 - On CUDA, native **with** register matches Torch H2D/D2H; native **without** register stays pageable-class (cite or remeasure #8283).
 - Pin makes copies **eligible** for overlap; do **not** claim “usable vs stalled” or a relative win until measured (including PCIe).
@@ -294,7 +294,7 @@ Headings stay **accelerator-neutral**. No “ZeRO” and no PR numbers in H2/H3 
 ```
 # Pinned Host Memory for CPU Offload: A Practitioner Guide
 ## Introduction
-### CPU offload for cost-efficiency and capability
+### CPU offload for cost-efficiency
 ### Three applications: model tensors, checkpoint activations, and saved activations
 ### Pin vs pageable as system efficiency
 ### What this post covers (evaluations, APIs, frameworks, best practices)
@@ -358,6 +358,6 @@ Collection order (hardware access) is not article order.
 1. Pin experiments: [DeepSpeedExamples `benchmarks/pin_memory`](https://github.com/deepspeedai/DeepSpeedExamples/tree/master/benchmarks/pin_memory) on DeepSpeed **`master`**. Land `activation_offload --model` before published HF rows.
 2. Collect **model-tensor** Qwen3 + **H2D/D2H** on B60, then H200. Ascend 910B4 Qwen3-4B rows are already measured.
 3. Collect the **activation checkpoint workload** (`--offload-optimizer --act-mem-opt`, async on, pin on/off) on B60 and H200. Ascend 910B4 Qwen3-4B seq 8192 is already measured. Named limitation if the B60 engine fails — do not invent numbers.
-4. Collect **saved-activation** pin on/off on H200 (Qwen3-8B, `N=1`, `--offload-tensors -1`, seq 8K–64K: collected, jobs `20261011T171729Z` unbound, `20261026T133233Z` and `20261024T171244Z` bound; Qwen3.5-9B collected unbound, job `20261017T235002Z`). Ascend 910B4 Qwen3-4B seq 2048 is measured. B60 saved-activation is required and not yet collected. Qwen3.5 is required, own chart.
+4. Collect **saved-activation** pin on/off on H200 (Qwen3-8B, `N=1`, `--offload-tensors -1`, seq 8K–64K: collected, jobs `20261011T171729Z` unbound, `20261026T133233Z` and `20261024T171244Z` bound; Qwen3.5-9B collected in rerun job `20261107T202125Z`; the earlier unbound Qwen3.5 run is withdrawn). Ascend 910B4 Qwen3-4B seq 2048 is measured. B60 saved-activation is required and not yet collected. Qwen3.5 is required, own chart.
 5. Re-run the non-H200 rows and Qwen3.5 bound, recording `numa_balancing` and the launch policy.
 6. Draft README when the Qwen rows for B60 (including saved-activation), H200, and Ascend 910B4 are in place. Synthetic stays in an appendix or method note.
