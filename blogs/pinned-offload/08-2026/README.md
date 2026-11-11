@@ -60,7 +60,8 @@ Speedup is the pageable step time divided by the pinned step time, for the same 
 - **Pinning sped up every workload we measured,** by 1.13× to 2.74× on Qwen3 (bound). On the hybrid Qwen3.5 architecture, the bound gains were 2.43× to 3.73×; unbound, 2.42× to 5.41×.
 - **Copy bandwidth does not predict step time.** On the H200, a 5.4× faster copy became anywhere from a 1.13× to a 2.74× faster Qwen3 step. The gain follows how much of the step is spent copying.
 - **Registration, not page-locking, makes host memory fast.** Locked-but-unregistered memory copies at pageable speed.
-- **Pageable runs are sensitive to placement; pinned runs are not.** Without NUMA binding, the same comparison overstated the pin speedup by up to 1.6×.
+- **Pageable runs are sensitive to placement; pinned runs are not.** Without NUMA binding, the same comparison overstated the pin speedup by up to 2.3× (5.98× unbound against 2.56× bound, 8-GPU saved-activation).
+- **Offload is what lets long sequences fit; pinning is what makes them fast.** On 8×H200 with the optimizer on the GPU, checkpoint offload ran 2.25× longer sequences than plain checkpointing, and saved-activation offload 2.29× longer than training without checkpointing. Pinning changed neither footprint.
 
 After the evaluation, we cover the pinning APIs in PyTorch, Hugging Face, and DeepSpeed, and the practices that follow from the measurements. The short version: **keep pinning on unless host RAM or the locked-memory limit is tight, and measure again on a new host link.**
 
@@ -122,6 +123,7 @@ Binding matters because the pageable arm is the noisy one. On the same H200 host
 | Activation checkpoint, 64K | 1.25× | **1.13×** |
 | Saved-activation, 64K | 3.85× | **2.74×** |
 | Activation checkpoint, 8×H200, 256K per GPU | 1.26× | **1.10×** |
+| Saved-activation, 8×H200, 16K per GPU | 5.98× | **2.56×** |
 
 Between unbound and bound runs, pinned saved-activation step times moved 4–8%, while pageable ones moved 16–38%. Unbound, the same 8K saved-activation command measured 3.08× in one run and 3.60× in another; bound, run-to-run spread was at most 0.37 s. Every H200 Qwen3 number in this post is bound; the H200 Qwen3.5 numbers are not yet, and are marked provisional.
 
@@ -252,6 +254,34 @@ At most one layer's saved tensors stay on the device during the forward pass, an
 
 Pinning is what makes skipping recomputation competitive at all. At 64K on the H200, in the same job, a pageable Qwen3 saved-activation step took 91.5 s, against 30.7 s for pageable checkpoint offload. Pinned, the gap narrows to 32.3 s against 26.8 s. Checkpoint offload remained faster and used far less device memory (44.7 GB against 125.1 GB), and Qwen3.5 shows the same ordering (30.1 s against 16.7 s pinned, from separate jobs). On this machine recomputation is still the better trade; saved-activation offload is the technique whose viability depends most on pinning. At 98K tokens it runs out of device memory on the H200.
 
+**Eight GPUs, optimizer on the GPU: capacity and placement**
+
+Saved-activation offload has its own capacity case: it skips recomputation, so its fair comparison is training without checkpointing, which keeps every saved tensor on the device. On 8×H200 with ZeRO-2 and GPU AdamW (fp32 state), that baseline runs out of device memory early, and saved-activation offload roughly doubles the length that fits, until the eight ranks' host buffers fill the host:
+
+| Model | No checkpointing, no offload: longest fit | Saved-activation offload: longest run | Capacity gain |
+|-------|-------------------------------------------|---------------------------------------|---------------|
+| Qwen3-8B | 14,336 tokens per GPU (out of memory at 16,384) | 32,768 (host memory runs out at 36,864) | **2.29×** |
+| Qwen3.5-9B | 10,240 (out of memory at 12,288) | 24,576 (host memory runs out at 28,672) | **2.40×** |
+
+Each rank holds 7.3 MB (Qwen3-8B) or 9.1 MB (Qwen3.5-9B) of host buffers per token, so at 32K the eight ranks hold about 1.8 TiB. Device memory is not the limit: 68.5 GB at 32K. Plain checkpointing fits far longer sequences on the same setup (233,472 tokens per GPU for Qwen3-8B), so this gain is over training without recomputation only.
+
+At 16K tokens per GPU, inside both windows, placement matters more here than for any other workload we measured:
+
+| Model, 16K tokens per GPU | Placement | Pageable step | Pinned step | Speedup |
+|---------------------------|-----------|---------------|-------------|---------|
+| Qwen3-8B | bound, `numactl` per rank | 23.71 s | 9.26 s | **2.56×** |
+| Qwen3-8B | bound, `deepspeed --bind_cores_to_rank` | 23.36 s | 9.25 s | 2.53× |
+| Qwen3-8B | torchrun `--numa-binding=node` | 38.05 s | 9.27 s | 4.11× |
+| Qwen3-8B | unbound | 58.17 s | 9.73 s | 5.98× |
+| Qwen3.5-9B | bound, `numactl` per rank | 29.01 s | 11.37 s | **2.55×** |
+| Qwen3.5-9B | bound, `deepspeed --bind_cores_to_rank` | 29.00 s | 11.30 s | 2.57× |
+| Qwen3.5-9B | torchrun `--numa-binding=node` | 59.00 s | 11.33 s | 5.21× |
+| Qwen3.5-9B | unbound | 80.72 s | 13.94 s | 5.79× |
+
+Binding with a memory policy cut the pageable step by about 2.5× on both models, because it doubled the pageable copy rate: device-to-host went from about 7 to about 15 GB/s per rank, and host-to-device from about 5 to 8.5 GB/s. Pinned copies ran at about 27 GB/s each way in every bound placement, and the pinned step moved by under 0.1 s across them. torchrun's CPU-only binding recovered only part of the pageable loss. Even with the best placement, pinning still made the step about 2.55× faster, against 1.10× for checkpoint offload at 256K, because saved-activation offload moves about 25 times more bytes per token.
+
+<!-- 8xH200 saved-activation setup: ZeRO-2 + GPU AdamW (--zero2-gpu, fp32 master + Adam state), torchrun 8 ranks, published settings credits 1 / prefetch 2 / offload-tensors -1 / native pin backend, calibrated discovery 4096/8192; DSE 53096d8 (per-rank manifest device fix included). Walls: no-remat job-20261110T200243Z, offload job-20261110T213152Z (rerun after the fix). 16K matrix: job-20261110T223544Z, 10 timed steps after 1 warmup, mean of 2 run medians; numactl via benchmarks/pin_memory/numa_bind_rank.sh; kernel.numa_balancing=1. -->
+
 ### Supporting H2D/D2H microbench
 
 <!-- FIGURE: media/h2d_d2h.png — separate panels per machine; CUDA panel has the Torch vs native parity inset. -->
@@ -346,7 +376,7 @@ Pinned pages cannot be swapped out, and the locked total is capped by `ulimit -l
 
 ### Host memory placement: NUMA node, automatic NUMA balancing, page size
 
-**Bind to the accelerator's NUMA node.** Launch single-accelerator offload training under `numactl --cpunodebind=<node> --preferred=<node>`, and bind each rank to its own device's node in multi-rank jobs. In an 8-GPU job at 256K tokens per GPU, binding every rank this way cut the pageable activation checkpoint step from 54.4 s to 47.6 s, while the pinned step stayed at 43.3 s. torchrun's `--numa-binding=node` is not enough on its own: it sets CPU affinity but no memory policy, and the same pageable step stayed at 54.1 s. Launch with DeepSpeed's `deepspeed --bind_cores_to_rank`, which adds a memory binding (`numactl -m <node>`) and matched per-rank `numactl` (47.5 s), or wrap each rank in `numactl --cpunodebind=<node> --preferred=<node>` yourself (the appendix's `--numa_bind node`). Two cautions for `--bind_cores_to_rank`: it hands out cores by local rank order, not by GPU, so it binds correctly only when GPU numbering follows NUMA order, as on our H200 (GPUs 0–3 on node 0; check with `nvidia-smi topo -m`); and its memory binding is strict, so a rank cannot spill to the other node when its own runs out. On the H200, moving the CPU threads to the far socket slowed a pageable activation checkpoint step from 7.2 s to 10.5 s, but a pinned one only from 4.2 s to 5.5 s. Pageable copies are staged by CPU threads; pinned copies are DMA. Model-tensor offload was insensitive to placement (3.76 s against 3.77 s pinned). On the Ascend, a remote node cost even pinned device-to-host copies about 26%, against at most 6% on the H200, so measure per platform.
+**Bind to the accelerator's NUMA node.** Launch single-accelerator offload training under `numactl --cpunodebind=<node> --preferred=<node>`, and bind each rank to its own device's node in multi-rank jobs. In an 8-GPU job at 256K tokens per GPU, binding every rank this way cut the pageable activation checkpoint step from 54.4 s to 47.6 s, while the pinned step stayed at 43.3 s. torchrun's `--numa-binding=node` is not enough on its own: it sets CPU affinity but no memory policy, and the same pageable step stayed at 54.1 s. Saved-activation offload is the most sensitive: at 16K tokens per GPU on Qwen3-8B, binding took the pageable step from 58.2 s to 23.7 s, and torchrun's CPU-only binding got it only to 38.1 s. Launch with DeepSpeed's `deepspeed --bind_cores_to_rank`, which adds a memory binding (`numactl -m <node>`) and matched per-rank `numactl` (47.5 s), or wrap each rank in `numactl --cpunodebind=<node> --preferred=<node>` yourself (the appendix's `--numa_bind node`). Two cautions for `--bind_cores_to_rank`: it hands out cores by local rank order, not by GPU, so it binds correctly only when GPU numbering follows NUMA order, as on our H200 (GPUs 0–3 on node 0; check with `nvidia-smi topo -m`); and its memory binding is strict, so a rank cannot spill to the other node when its own runs out. On the H200, moving the CPU threads to the far socket slowed a pageable activation checkpoint step from 7.2 s to 10.5 s, but a pinned one only from 4.2 s to 5.5 s. Pageable copies are staged by CPU threads; pinned copies are DMA. Model-tensor offload was insensitive to placement (3.76 s against 3.77 s pinned). On the Ascend, a remote node cost even pinned device-to-host copies about 26%, against at most 6% on the H200, so measure per platform.
 
 **Watch automatic NUMA balancing.** With `kernel.numa_balancing=1`, the kernel samples and migrates pages of every large host buffer each step. Pinning the offload buffers does not prevent this, because DeepSpeed's CPU Adam state is ordinary pageable memory. On the H200 it cost 1.6 to 6.8 million page faults and 10 to 70 CPU-seconds per step, in pinned and pageable runs alike. Any explicit task memory policy, such as the binding above, turns it off for the process.
 
@@ -391,6 +421,17 @@ python activation_offload/bench_8gpu.py --nproc 8 --zero2 --fused_ce --tiled_mlp
   --model_name Qwen/Qwen3-8B --mbs 1 --gas 1 --modes ds_async --seqlens 262144 --packed_seq \
   --pack_lens $(python -c "print(','.join(['4096'] * 64))") --packed_tiled_remat_budget 0 \
   --warmup 2 --iters 5 --act_pin_memory --numa_bind node
+
+# Saved-activation offload on 8 GPUs, optimizer on the GPU (capacity and 16K rows).
+# 1) Prepare manifests once, single process (forward-only discovery):
+python saved_activation_offload/bench.py --model Qwen/Qwen3-8B --act-mem-opt --offload-tensors -1 --credits 1 \
+  --prefetch 2 --batch 1 --offload-optimizer --discover-calib-seqs 4096 8192 \
+  --manifest-out man-{seq}.json --prepare-seqs 16384
+# 2) One arm per command (--pin 0 for pageable), each rank bound to its GPU's node:
+torchrun --standalone --nproc_per_node=8 --no-python bash numa_bind_rank.sh python \
+  saved_activation_offload/bench.py --model Qwen/Qwen3-8B --act-mem-opt --offload-tensors -1 --credits 1 \
+  --prefetch 2 --batch 1 --zero2-gpu --mode offload --seq 16384 --steps 10 --warmup 1 \
+  --manifest-out man-16384.json --pin 1
 
 # Saved-activation offload
 $BIND python saved_activation_offload/bench.py --model Qwen/Qwen3-8B --offload-optimizer --act-mem-opt \
