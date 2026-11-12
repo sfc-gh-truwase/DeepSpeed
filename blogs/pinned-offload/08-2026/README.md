@@ -9,7 +9,7 @@ Blocks publish:
 - Ascend 910B4: every row (Qwen3 and Qwen3.5) will be replaced by a run bound to the NPU's NUMA node.
   The Ascend numbers below are the earlier unbound collection and are placeholders until then.
 - Ascend H2D/D2H will be re-run with host buffers written before timing; the Ascend page-size sentence waits on the same rerun.
-- H200 Qwen3.5-9B rows are unbound; the provisional caveats stay unless they are re-run bound.
+- H200: every printed row is bound, Qwen3.5-9B included (its model-tensor 2.77x is the bound run in job-20261107T043012Z; 2.94x is the unbound run in the same job).
 - H200 Qwen3.5-9B saved-activation 64K, bound (2026-11-07 rerun): 108.53 s pageable, 29.08 s pinned, 3.73×.
 - Ascend Qwen3.5-4B saved-activation row is not collected.
 - Setup table: DeepSpeed commit per SKU, and Ascend ulimit -l / numa_balancing / node, are missing.
@@ -94,15 +94,15 @@ All end-to-end runs use Hugging Face models built from their configs with random
 
 | | NVIDIA H200 | Ascend 910B4 | Intel Arc Pro B60 |
 |--|-------------|--------------|-------------------|
-| Devices used | 1 GPU of 8 | 1 NPU | 1 GPU <!-- TODO --> |
+| Devices used | 1 GPU of 8; all 8 in the 8×H200 blocks | 1 NPU | 1 GPU <!-- TODO --> |
 | Device memory | 141 GB HBM3e | 29.5 GiB usable (32 GiB physical) | 24 GB |
 | Host CPU | 2× Xeon 8488C, 192 CPUs, 2 NUMA nodes | Kunpeng-920, 42-core container quota | <!-- TODO --> |
 | Host–device link | PCIe Gen5 | Ascend host link | PCIe <!-- TODO: generation --> |
 | Software | PyTorch 2.14.0+cu130, Transformers 5.16.0.dev0, flash-attn 2.8.3, Liger kernel 0.8.4 | PyTorch with `torch_npu` <!-- TODO: versions --> | Stock PyTorch `xpu` (2.8+) <!-- TODO: versions --> |
-| DeepSpeed commit | <!-- TODO (>= #8283) --> | <!-- TODO --> | <!-- TODO --> |
+| DeepSpeed commit | upstream `581ac41` (fork branch `tjruwase/pinned-offload-blog`; its later commits change docs only) | <!-- TODO --> | <!-- TODO --> |
 | `ulimit -l` | unlimited | <!-- TODO --> | <!-- TODO --> |
 | `kernel.numa_balancing` | 1 | <!-- TODO --> | <!-- TODO --> |
-| Launch | `numactl --cpunodebind=0 --preferred=0` | `numactl --cpunodebind=<n> --preferred=<n>` <!-- TODO: node --> | <!-- TODO --> |
+| Launch | `numactl --cpunodebind=0 --preferred=0`; in 8-GPU runs, each rank on its own GPU's node | `numactl --cpunodebind=<n> --preferred=<n>` <!-- TODO: node --> | <!-- TODO --> |
 | Models | Qwen3-8B, Qwen3.5-9B | Qwen3-4B, Qwen3.5-4B | <!-- TODO: Qwen3-0.6B or 1.7B; Qwen3.5-0.8B or 2B --> |
 
 Host RAM, not device memory, is often the limit for model-tensor offload. On the H200, Qwen3-8B with `zero.Init` kept 137 GB of offloaded state in host memory. Without `zero.Init`, plan on about 27 bytes of host memory per parameter (18 bytes of state, times 1.5 for buffers), about 206 GiB for Qwen3-8B. Pinning that much also needs `ulimit -l` raised to cover it.
@@ -115,17 +115,19 @@ The pinned arm uses DeepSpeed's native backend with device registration on CUDA 
 - **Bind to the accelerator's NUMA node.** Every Qwen3 run is launched with `numactl --cpunodebind=<n> --preferred=<n>`, which also turns off automatic NUMA balancing for the process.
 - **Compare within one machine, one page size, and one placement.**
 
-Binding matters because the pageable arm is the noisy one. On the same H200 host and day, unbound runs inflated every pin speedup:
+Binding matters because the pageable arm is the noisy one. On the same H200 host, comparing unbound and bound runs from the same job, unbound runs inflated every pin speedup:
 
 | Application | Unbound | Bound |
 |-------------|---------|-------|
-| Model-tensor, 4K | 2.90× | **2.82×** |
+| Model-tensor, 4K | 3.62× | **2.82×** |
 | Activation checkpoint, 256K | 1.24× | **1.15×** |
 | Saved-activation, 64K | 3.85× | **2.74×** |
 | Activation checkpoint, 8×H200, 256K per GPU | 1.26× | **1.10×** |
 | Saved-activation, 8×H200, 16K per GPU | 5.98× | **2.56×** |
 
-Between unbound and bound runs, pinned saved-activation step times moved 4–8%, while pageable ones moved 16–38%. Unbound, the same 8K saved-activation command measured 3.08× in one run and 3.60× in another; bound, run-to-run spread was at most 0.37 s. Every H200 Qwen3 number in this post is bound; of the H200 Qwen3.5 numbers, only the model-tensor row is not yet, and it is marked provisional.
+<!-- Each row pairs unbound and bound runs from the same job. Model-tensor: job-20261107T043012Z (unbound 14.82 -> 4.09 s; bound 10.53 -> 3.74 s); an earlier job, job-20261024T171244Z, measured 2.90x unbound vs 2.82x bound, which is itself evidence that unbound pageable runs do not reproduce. Activation checkpoint 256K: job-20261111T160827Z. Saved-activation 64K: job-20261107T202125Z. 8xH200: job-20261110T114439Z / job-20261110T143411Z and job-20261110T223544Z. -->
+
+Between unbound and bound runs, pinned saved-activation step times moved 4–8%, while pageable ones moved 16–38%. Unbound, the same 8K saved-activation command measured 3.08× in one run and 3.60× in another; bound, run-to-run spread was at most 0.37 s. Every H200 number in this post, Qwen3 and Qwen3.5, is bound.
 
 ### Model-tensor offload (Arc Pro B60, H200, Ascend 910B4)
 
@@ -153,7 +155,7 @@ Between unbound and bound runs, pinned saved-activation step times moved 4–8%,
 | Ascend 910B4 | Qwen3.5-4B, 1024 | 17.95 s | 13.95 s | **1.29×** |
 | Arc Pro B60 | <!-- TODO: Qwen3.5-0.8B or 2B --> | | | |
 
-<!-- H200 Qwen3.5: job-20261016T193445Z, unbound, fla + causal-conv1d installed. Ascend Qwen3.5: TODO bound rerun. -->
+<!-- H200 Qwen3.5: job-20261107T043012Z, bound to GPU0's node (unbound in the same job: 13.39 -> 4.56 s, 2.94x); fla + causal-conv1d installed. Ascend Qwen3.5: TODO bound rerun. -->
 
 With ZeRO-3 CPU offload, every layer's parameters cross the link in every forward and backward pass, whatever the sequence length. On the H200 that transfer dominates the pageable step, and pinning turns a transfer-bound step into one close to compute-bound: about 3× on both architectures, as expected when parameter traffic, not the attention design, sets the step time. The Ascend gains are smaller but still substantial.
 
