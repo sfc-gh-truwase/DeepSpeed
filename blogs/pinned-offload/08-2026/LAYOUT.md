@@ -136,7 +136,7 @@ Under `media/`, equal weight for the three wall-time workloads, microbench suppo
 
 - `summary.png`: headline pin speedups, Qwen3, one panel per machine.
 - `model_tensor_qwen3.png` / `model_tensor_qwen3_5.png`. H200 bound Qwen3-8B: 2.82×. H200 Qwen3.5-9B (unbound): 2.94×.
-- `activation_checkpoint_qwen3.png` / `activation_checkpoint_qwen3_5.png`, longest sequence only. H200 bound Qwen3-8B at 64K: 1.13×. H200 Qwen3.5-9B at 64K (unbound): 1.25×.
+- `activation_checkpoint_qwen3.png` / `activation_checkpoint_qwen3_5.png`, longest sequence only. H200 at 256K (where offload starts to matter), bound: Qwen3-8B 1.15×, Qwen3.5-9B 1.16×.
 - `saved_activation_qwen3.png` / `saved_activation_qwen3_5.png`, longest sequence only. H200 bound Qwen3-8B at 64K: 2.74×. H200 Qwen3.5-9B at 64K (unbound): 5.41×.
 - Optional `activation_async_vs_blocking.png`: #8282 async versus blocking (both pinned), beside the activation checkpoint section, labeled as a different axis.
 - `h2d_d2h.png`: supporting panels for CUDA (with the Torch versus native-registered parity inset), B60, and Ascend 910B4.
