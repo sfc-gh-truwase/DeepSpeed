@@ -103,7 +103,7 @@ All end-to-end runs use Hugging Face models built from their configs with random
 | `ulimit -l` | unlimited | <!-- TODO --> | <!-- TODO --> |
 | `kernel.numa_balancing` | 1 | <!-- TODO --> | <!-- TODO --> |
 | Launch | `numactl --cpunodebind=0 --preferred=0`; in 8-GPU runs, each rank on its own GPU's node | `numactl --cpunodebind=<n> --preferred=<n>` <!-- TODO: node --> | <!-- TODO --> |
-| Models | Qwen3-8B, Qwen3.5-9B | Qwen3-4B, Qwen3.5-4B | <!-- TODO: Qwen3-0.6B or 1.7B; Qwen3.5-0.8B or 2B --> |
+| Models | Qwen3-8B, Qwen3.5-9B; Qwen3-32B, Qwen3.5-27B for 8×H200 optimizer offload | Qwen3-4B, Qwen3.5-4B | <!-- TODO: Qwen3-0.6B or 1.7B; Qwen3.5-0.8B or 2B --> |
 
 Host RAM, not device memory, is often the limit for model-tensor offload. On the H200, Qwen3-8B with `zero.Init` kept 137 GB of offloaded state in host memory. Without `zero.Init`, plan on about 27 bytes of host memory per parameter (18 bytes of state, times 1.5 for buffers), about 206 GiB for Qwen3-8B. Pinning that much also needs `ulimit -l` raised to cover it.
 
@@ -158,6 +158,25 @@ Between unbound and bound runs, pinned saved-activation step times moved 4–8%,
 <!-- H200 Qwen3.5: job-20261107T043012Z, bound to GPU0's node (unbound in the same job: 13.39 -> 4.56 s, 2.94x); fla + causal-conv1d installed. Ascend Qwen3.5: TODO bound rerun. -->
 
 With ZeRO-3 CPU offload, every layer's parameters cross the link in every forward and backward pass, whatever the sequence length. On the H200 that transfer dominates the pageable step, and pinning turns a transfer-bound step into one close to compute-bound: about 3× on both architectures, as expected when parameter traffic, not the attention design, sets the step time. The Ascend gains are smaller but still substantial.
+
+**Eight GPUs, larger models: optimizer offload**
+
+With eight GPUs, ZeRO shards the optimizer state, so a 9B model trains comfortably with AdamW on the GPU. Offload starts to matter at 27B–32B. With ZeRO-2 and 4096 tokens per GPU, AdamW on the GPU does not fit Qwen3-32B at all, and fits Qwen3.5-27B with only about 14.5 GB of HBM to spare (125.3 of 139.8 GB reserved), close enough to the edge that a small change in the environment can push it over. Offloading the optimizer to the CPU (DeepSpeed's CPU Adam, fp32 master weights and Adam state on the host) brings the peak down to 70.7 GB and 65.3 GB.
+
+| Model, 4096 tokens per GPU | Launch | Pageable step | Pinned step | Speedup |
+|----------------------------|--------|---------------|-------------|---------|
+| Qwen3-32B | `deepspeed --bind_cores_to_rank` | 15.41 s | 9.78 s | **1.58×** |
+| Qwen3-32B | `numactl` per rank, `OMP_NUM_THREADS=12` | 15.53 s | 9.73 s | **1.60×** |
+| Qwen3-32B | torchrun, unbound, `OMP_NUM_THREADS=12` | 20.02 s | 9.82 s | 2.04× |
+| Qwen3-32B | torchrun, unbound, default (`OMP_NUM_THREADS=1`) | 30.16 s | 17.73 s | 1.70× |
+| Qwen3.5-27B | `deepspeed --bind_cores_to_rank` | 12.63 s | 8.01 s | **1.58×** |
+| Qwen3.5-27B | `numactl` per rank, `OMP_NUM_THREADS=12` | 12.60 s | 8.02 s | **1.57×** |
+| Qwen3.5-27B | torchrun, unbound, `OMP_NUM_THREADS=12` | 14.67 s | 8.90 s | 1.65× |
+| Qwen3.5-27B | torchrun, unbound, default (`OMP_NUM_THREADS=1`) | 22.71 s | 13.98 s | 1.62× |
+
+With a good launch, pinning makes the offloaded step about 1.6× faster on both models. Because CPU Adam runs on the host, the launch itself matters as much as pinning. torchrun sets `OMP_NUM_THREADS=1` for every rank, so CPU Adam runs on one thread: that alone made the pinned Qwen3-32B step 17.73 s instead of 9.82 s (13.98 s instead of 8.90 s for Qwen3.5-27B). `deepspeed --bind_cores_to_rank` sets the thread count to the cores it gives each rank (12 here) and binds memory, and matched hand-tuned `numactl` with `OMP_NUM_THREADS=12`. Binding then mostly helps the pageable arm (20.02 s to 15.53 s on Qwen3-32B). For Qwen3.5-27B, offload trades speed for headroom: with AdamW on the GPU its step takes 2.96 s, about 2.7× faster than the best offloaded step.
+
+<!-- 8xH200 optimizer offload: job-20261111T024327Z, bench_8gpu.py (DSE 1bd3ad4) --zero2_offload --cpu_optimizer AdamW, one packed 4096-token sample per GPU, gradient checkpointing, Liger fused linear CE + TiledMLP x4; arm = offload_optimizer.pin_memory, native pin backend; mean of 2 runs x 10 timed steps; kernel.numa_balancing=1. Controls (ZeRO-2, GPU AdamW): Qwen3-32B out of memory; Qwen3.5-27B 2.96 s, 112.8 GB allocated / 125.3 GB reserved. Host 579 GiB (32B) and 491 GiB (27B) pod-wide. -->
 
 ### Activation checkpoint workload (same hardware and families)
 
@@ -380,6 +399,8 @@ Pinned pages cannot be swapped out, and the locked total is capped by `ulimit -l
 
 **Bind to the accelerator's NUMA node.** Launch single-accelerator offload training under `numactl --cpunodebind=<node> --preferred=<node>`, and bind each rank to its own device's node in multi-rank jobs. In an 8-GPU job at 256K tokens per GPU, binding every rank this way cut the pageable activation checkpoint step from 54.4 s to 47.6 s, while the pinned step stayed at 43.3 s. torchrun's `--numa-binding=node` is not enough on its own: it sets CPU affinity but no memory policy, and the same pageable step stayed at 54.1 s. Saved-activation offload is the most sensitive: at 16K tokens per GPU on Qwen3-8B, binding took the pageable step from 58.2 s to 23.7 s, and torchrun's CPU-only binding got it only to 38.1 s. Launch with DeepSpeed's `deepspeed --bind_cores_to_rank`, which adds a memory binding (`numactl -m <node>`) and matched per-rank `numactl` (47.5 s), or wrap each rank in `numactl --cpunodebind=<node> --preferred=<node>` yourself (the appendix's `--numa_bind node`). Two cautions for `--bind_cores_to_rank`: it hands out cores by local rank order, not by GPU, so it binds correctly only when GPU numbering follows NUMA order, as on our H200 (GPUs 0–3 on node 0; check with `nvidia-smi topo -m`); and its memory binding is strict, so a rank cannot spill to the other node when its own runs out. On the H200, moving the CPU threads to the far socket slowed a pageable activation checkpoint step from 7.2 s to 10.5 s, but a pinned one only from 4.2 s to 5.5 s. Pageable copies are staged by CPU threads; pinned copies are DMA. Model-tensor offload was insensitive to placement (3.76 s against 3.77 s pinned). On the Ascend, a remote node cost even pinned device-to-host copies about 26%, against at most 6% on the H200, so measure per platform.
 
+**Give CPU Adam its threads.** torchrun sets `OMP_NUM_THREADS=1` for every rank unless you override it, which leaves DeepSpeed's CPU Adam on one thread. On 8×H200 with Qwen3-32B and the optimizer offloaded, that made the pinned step 17.73 s instead of 9.82 s. Set `OMP_NUM_THREADS` to the cores each rank owns, or launch with `deepspeed --bind_cores_to_rank`, which does it for you.
+
 **Watch automatic NUMA balancing.** With `kernel.numa_balancing=1`, the kernel samples and migrates pages of every large host buffer each step. Pinning the offload buffers does not prevent this, because DeepSpeed's CPU Adam state is ordinary pageable memory. On the H200 it cost 1.6 to 6.8 million page faults and 10 to 70 CPU-seconds per step, in pinned and pageable runs alike. Any explicit task memory policy, such as the binding above, turns it off for the process.
 
 <!-- FIGURE: media/placement.png — faults per step and step time, unbound vs bound, pinned and pageable arms (H200). -->
@@ -412,6 +433,12 @@ BIND="numactl --cpunodebind=$N --preferred=$N"
 
 # Model-tensor offload
 $BIND python model_tensor_offload/bench.py --model Qwen/Qwen3-8B --batch 1 --seq 4096 --steps 10
+
+# Optimizer offload on 8 GPUs (Qwen3-32B, Qwen3.5-27B). One arm per command (--no-opt_pin_memory for pageable).
+DS_PIN_MEMORY_BACKEND=native python activation_offload/bench_8gpu.py --nproc 8 --zero2_offload --cpu_optimizer AdamW \
+  --fused_ce --tiled_mlp_shards 4 --model_name Qwen/Qwen3-32B --mbs 1 --gas 1 --modes gc --seqlens 4096 \
+  --packed_seq --pack_lens 4096 --packed_tiled_remat_budget 0 --warmup 1 --iters 10 --opt_pin_memory \
+  --numa_bind ds_bind_cores
 
 # Activation checkpoint offload (one arm per command; --no-act_pin_memory --no-opt_pin_memory for pageable)
 DS_PIN_MEMORY_BACKEND=native $BIND python activation_offload/bench_8gpu.py --nproc 1 --zero2_offload --cpu_optimizer AdamW \
