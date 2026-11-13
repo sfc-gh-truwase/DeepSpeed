@@ -475,7 +475,28 @@ Placement and threads are set when the job launches, not in a configuration file
 - **`torchrun --numa-binding=node`** sets CPU affinity only. It sets no memory policy, so automatic NUMA balancing stays on. torchrun also sets `OMP_NUM_THREADS=1` for every rank unless you override it.
 - **`deepspeed --bind_cores_to_rank`** gives each local rank its own block of cores, binds memory to their node (`numactl -m <node>`), and sets `OMP_NUM_THREADS` to the number of cores it gave the rank. It hands out cores by local rank order, not by GPU, so it binds correctly only when GPU numbering follows NUMA order, as on our H200 (GPUs 0–3 on node 0; check with `nvidia-smi topo -m`). Its memory binding is strict, so a rank cannot spill to the other node when its own runs out.
 
+### Across the PyTorch ecosystem
+
+| Framework | Pinning | NUMA placement | Per-rank CPU threads |
+|-----------|---------|----------------|----------------------|
+| PyTorch, including FSDP | PyTorch's caching host allocator (`pin_memory()`, `pin_memory=True`; FSDP's `CPUOffloadPolicy(pin_memory=True)`) | `torchrun --numa-binding`: CPU affinity only | `OMP_NUM_THREADS=1` per rank unless you set it |
+| Hugging Face Transformers and Accelerate | PyTorch's (`dataloader_pin_memory`); offload is delegated to DeepSpeed or FSDP | `accelerate launch --enable_cpu_affinity`: GPU-aware CPU affinity, no memory policy | `--num_cpu_threads_per_process`, 1 by default for GPU runs |
+| Megatron-LM, with Transformer Engine | PyTorch's (optimizer offload pins gradients and parameters by default; Transformer Engine's activation offload always pins) | none; left to the launcher | inherited from the launcher |
+| DeepSpeed | its own `native` backend, or PyTorch's (`DS_PIN_MEMORY_BACKEND`) | `deepspeed --bind_cores_to_rank`: cores and memory per rank | set from the core binding |
+
+DeepSpeed is the only one of these whose pinning does not have to go through PyTorch's allocator: its native backend locks exactly the requested size, works on CPU-only hosts, and releases the memory as soon as you call `unpin_memory()`, and `pin_empty()` and `pin_empty_like()` allocate pinned buffers directly on either backend. Its launcher is also the only one here that binds memory as well as CPUs and sets each rank's thread count from that binding.
+
+<!-- Source-verified 2026-11-12/13: torch 2.14 torch/distributed/run.py:980 (OMP_NUM_THREADS default) and torch/numa/binding.py (numactl --physcpubind only); FSDP v1 and FSDP2 pin via .pin_memory() (torch 2.9.1 source); transformers 5.16.0.dev0 training_args.py; accelerate 1.9.0 utils/environment.py (nvmlDeviceGetCpuAffinity + sched_setaffinity) and utils/launch.py; Megatron-LM main megatron/training/arguments.py (no NUMA or affinity flags) and megatron/core/optimizer/cpu_offloading/hybrid_optimizer.py; Transformer Engine main transformer_engine/pytorch/cpu_offload.py. CPU-only native pin measured 2026-11-10 (VmLck 0 -> 1 GiB -> 0). Not measured: Accelerate's affinity. -->
+
 ## Best practices
+
+In short, set the three levers together:
+
+1. **Pin offload host buffers through the framework.** Pinning sped up every offload workload we measured without changing device or host memory use: it buys speed, and offload buys the capacity.
+2. **Bind each rank's CPUs and memory to its accelerator's NUMA node, even when you pin.** On 8×H200 the pageable step moved by up to 2.8× with placement and the pinned step by about 5% or less (23% in one case). CPU affinity alone, as from `torchrun --numa-binding`, is not enough.
+3. **Give the CPU optimizer its threads.** Set `OMP_NUM_THREADS` to the cores each rank owns; torchrun defaults it to 1.
+
+`deepspeed --bind_cores_to_rank` covers 2 and 3 in one flag, as long as your GPUs are numbered in NUMA order.
 
 ### Pinned memory: independent knobs (offload pin_memory vs use_pin_memory)
 
