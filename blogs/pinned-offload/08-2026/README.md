@@ -4,8 +4,8 @@ reproduction commands is ARXIV_DRAFT.md; every number here comes from it. Headin
 
 Blocks publish:
 - Intel Arc Pro B60: every result (single and multi-device) is not collected.
-- Ascend 910B4: bound reruns of the single-device rows (current numbers are unbound placeholders), the Qwen3.5-4B
-  saved-activation row, and the multi-device results.
+- Ascend 910B4: bound reruns of the single-device rows and the copy bandwidth (current numbers are unbound
+  placeholders), the Qwen3.5-4B saved-activation row, and the multi-device results, including all-NPU copy bandwidth.
 - Figures (media/) and the contributor list.
 - Link to the arXiv version once it is posted.
 -->
@@ -18,7 +18,7 @@ CPU offload is an important technique for scaling training. By keeping model sta
 
 This blog shows:
 
-1. The performance impact of tuning these settings on three offload workloads, across three accelerator types, on single-device and multi-device runs.
+1. The performance impact of tuning these settings on four workloads (host-device copies and three offload training workloads), across three accelerator types, on single-device and multi-device runs.
 2. How PyTorch-ecosystem frameworks support pinning, NUMA placement, and CPU threads.
 3. Best practices.
 
@@ -28,15 +28,16 @@ The [full technical report](ARXIV_DRAFT.md) has the methodology, every measureme
 
 ### Workloads and hardware
 
-We evaluated three offload workloads, which can be combined in one job. Every run trained with DeepSpeed:
+We evaluated four workloads. The first measures the copies themselves; the other three are offload training workloads, which can be combined in one job, and every training run used DeepSpeed:
 
+- **Host-device copies.** A microbenchmark that copies 256 MiB host buffers to the accelerator and back, the transfer every offload workload depends on.
 - **Model-tensor offload.** Parameters and optimizer states live in host memory and are copied to the accelerator as needed (DeepSpeed ZeRO CPU offload). The multi-device runs offload only the optimizer and keep the parameters on the accelerator.
 - **Activation checkpoint offload.** The inputs saved by activation checkpointing go to host memory in the forward pass and come back for recomputation (DeepSpeed CPU checkpointing).
 - **Saved-activation offload.** Every tensor saved for the backward pass goes to host memory and comes back, with no recomputation. This one is a benchmark built on DeepSpeed's pinned memory, not yet a DeepSpeed option.
 
 On a single device, the two activation workloads also offload the optimizer, and pinning covers its host buffers too. The multi-device activation runs keep the optimizer on the accelerator.
 
-We ran them on three accelerator types: NVIDIA H200, Huawei Ascend 910B4, and Intel Arc Pro B60, each within a single host (multi-node runs were not tested). Each uses two Hugging Face model families in separate tables: Qwen3 (dense) and Qwen3.5 (hybrid linear and full attention), randomly initialized, in bf16, at batch size 1. Model size and sequence length differ by machine, so compare results within a column, not across columns. The full report lists hardware and software versions.
+We ran them on three accelerator types: NVIDIA H200, Huawei Ascend 910B4, and Intel Arc Pro B60, each within a single host (multi-node runs were not tested). Each training workload uses two Hugging Face model families in separate tables: Qwen3 (dense) and Qwen3.5 (hybrid linear and full attention), randomly initialized, in bf16, at batch size 1. Model size and sequence length differ by machine, so compare results within a column, not across columns. The full report lists hardware and software versions.
 
 ### Single device: pinning
 
@@ -60,7 +61,7 @@ We ran them on three accelerator types: NVIDIA H200, Huawei Ascend 910B4, and In
 
 <!-- TODO: Ascend columns from the bound rerun; B60 columns. -->
 
-Speedup is the pageable step time divided by the pinned step time, with both runs bound to the accelerator's NUMA node, the fairest pageable baseline we found. Pinning helped every workload on every machine we measured. The gain tracks how much of the step is copying: on the H200, model-tensor and saved-activation offload move the most data and gain the most, while checkpoint offload copies one tensor per layer and gains least. Qwen3.5 saved-activation offload gains most of all, plausibly because its linear-attention layers add little compute per token, so copies stay most of the step. On the H200, a 5.4× faster host-to-device copy became a 1.15× to 3.73× faster training step.
+Speedup is the pageable step time divided by the pinned step time, with both runs bound to the accelerator's NUMA node, the fairest pageable baseline we found. Pinning helped every workload on every machine we measured. The gain tracks how much of the step is copying: on the H200, model-tensor and saved-activation offload move the most data and gain the most, while checkpoint offload copies one tensor per layer and gains least. Qwen3.5 saved-activation offload gains most of all, plausibly because its linear-attention layers add little compute per token, so copies stay most of the step.
 
 ### Multiple devices: pinning, NUMA placement, and CPU threads
 
@@ -92,12 +93,31 @@ Because the starting point is unbound and pageable, the Pinning column also reco
 
 Offload is also what makes these runs fit. With the optimizer on the GPU, checkpoint offload fit 2.25× more tokens per GPU than plain checkpointing on Qwen3-8B. Saved-activation offload fit 2.29× more than training without checkpointing, but still far fewer than plain checkpointing, which remains the better choice for long sequences on this machine.
 
+### Host-device copies
+
+The step-time gains come from faster copies. The table gives the pinned speedup for 256 MiB copies in each direction, per device, bound to the accelerator's NUMA node, with one device copying and with every device in the host copying at once (eight on the H200 server).
+
+<!-- FIGURE: media/h2d_d2h.png — pinned speedup per direction, one panel per machine, one device and all devices copying. -->
+
+| Machine | Direction | One device copying | All devices copying |
+|---------|-----------|--------------------|---------------------|
+| H200 | Host to device | **5.4×** | **3.2×** |
+| H200 | Device to host | **3.2×** | **1.7×** |
+| Ascend 910B4 | Host to device | **4.0×** | *pending* |
+| Ascend 910B4 | Device to host | **3.9×** | *pending* |
+| Arc Pro B60 | Host to device | *pending* | *pending* |
+| Arc Pro B60 | Device to host | *pending* | *pending* |
+
+<!-- Sources: ARXIV_DRAFT.md single-device and all-GPUs-copying microbench tables. H200 one device: 10.2 -> 55.4 and 17.3 -> 54.9 GB/s; all eight, bound, per GPU: 8.6 -> 27.9 and 15.4 -> 26.4 GB/s. Ascend: 6.48 -> 25.97 and 6.71 -> 26.49 GB/s (unbound placeholder). -->
+
+Copy speedups are larger than step speedups because only part of a step is copying: on one H200, a 5.4× faster host-to-device copy became a 1.15× to 3.73× faster training step. With all eight H200 GPUs copying, pinned bandwidth per GPU halves while pageable bandwidth barely moves, so the speedup shrinks. On our server, GPUs share a PCIe switch uplink in pairs, and pageable copies are limited by CPU staging rather than the link. Pinned copies in eight-GPU training ran at the same ceiling as this benchmark. Placement also starts to reach pinned copies: unbound, pinned device-to-host copies were 17% slower than bound.
+
 ### What the results show
 
 - **Pinning is the biggest single lever when the step is copy-bound.** From torchrun's defaults, it alone made 8-GPU saved-activation offload 5.98× faster, against 2.45× for NUMA binding alone. Against a bound pageable run it was still 2.56×.
 - **When the CPU computes, threads matter as much as pinning.** With the optimizer offloaded, CPU Adam is host compute that pinning cannot speed up. Giving it 12 threads per rank was worth 1.51×, close to pinning's 1.70×, and all three settings together gave 3.10×.
 - **Pinning makes placement matter less, not zero.** On the H200, binding moved the pageable step by up to 2.8× and the pinned step by about 5% or less, except Qwen3.5 saved-activation offload, where it moved 23%. An unbound comparison can overstate the benefit of pinning by up to 2.3×. On the Ascend, a remote NUMA node still slowed pinned device-to-host copies by about 26%.
-- **Shared links cap multi-device copies.** On our 8×H200 server, GPUs sit in pairs behind a shared PCIe switch, so pinned copy bandwidth per GPU halved when all eight copied (55 to 28 GB/s), while pageable copies, limited by CPU staging, barely changed (10 to 9 GB/s). The per-GPU pin advantage shrinks with it.
+- **Shared links cap multi-device copies.** On our 8×H200 server, pinned copy bandwidth per GPU halved when all eight GPUs copied, while pageable bandwidth barely moved, so the per-GPU pin advantage shrank from 5.4× to 3.2× host to device.
 - **Registration, not page-locking, makes host memory fast.** On the H200, memory that was locked but not registered with the device driver copied at pageable speed.
 - **Some settings did not help.** On the H200, huge pages and the choice of pinning backend changed step time by at most 4% once placement was fixed and memory registered.
 
