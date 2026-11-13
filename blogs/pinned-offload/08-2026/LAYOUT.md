@@ -28,7 +28,7 @@ Short and high level (user, 2026-11-13): results as speedups only, no step-time 
 - **Workloads and hardware:** one bullet per workload, naming the DeepSpeed feature each ran on; one sentence that single-device activation runs also offload (and pin) the optimizer while multi-device activation runs keep it on the accelerator; the three machines, two model families, single-host scope, and model setup in one paragraph, with the rule to compare within a column.
 - **Single device:** a Qwen3 table and a Qwen3.5 table, workload × machine, pin speedup only (sequence length in parentheses for every cell; list multiple lengths separately, never as a range). Unfilled cells say *pending*. One short paragraph of interpretation that defines the bound pageable baseline and quotes the full single-device range across both families.
 - **Multiple devices:** a Qwen3 table and a Qwen3.5 table per machine, workload × setting (pinning, NUMA binding, CPU threads, all), from torchrun's defaults, with the ratio and **All** defined before the tables. Then: the dashes; the bound-baseline pin speedups, since the Pinning column also recovers what binding fixes; and the capacity gains, each against its own baseline (saved-activation offload still fits far fewer tokens than plain checkpointing).
-- **What the results show:** five short findings. Scope each to the machine it was measured on ("On the H200") until the other machines confirm it.
+- **What the results show:** six short findings. Scope each to the machine it was measured on ("On the H200") until the other machines confirm it.
 - **Framework support in the PyTorch ecosystem:** scope to the four PyTorch training frameworks compared, named in the first sentence; then the claim that among them DeepSpeed gives the most control over the three settings (the only one that handles all three itself). One table, framework (DeepSpeed first; PyTorch including FSDP; Hugging Face Transformers and Accelerate; Megatron-LM with Transformer Engine) × setting (pinning, NUMA placement, CPU threads per rank). Report what each framework supports, not how: no flags, environment variables, or allocator internals (those stay in the arXiv draft's "Across the PyTorch ecosystem"). Then a short summary that DeepSpeed provides everything practitioners need to maximize offload performance: pinning on by default, binding and threads from one launcher option, and the measured cost of skipping that option (no per-setting bullets; the table already covers them), the NUMA-order caveat, and a link to the full report for the flags.
 - **Best practices:** five short bullets saying what to do, not how: no flags, commands, or environment variables (those stay in the arXiv draft).
 - **Conclusion:** one paragraph, then the benchmark and full-report links.
@@ -122,7 +122,7 @@ H200 Qwen3-8B and Qwen3.5-9B at 64K, `N=1`, `M=2`, `--offload-tensors -1`. Ascen
 
 #### Supporting H2D/D2H microbench
 
-CUDA: pageable versus pinned, Torch versus native-registered parity inset. B60: pageable versus Torch/XPU pin. Ascend: native-registered versus pageable, own panel, plus the remote-node cost on pinned D2H (~26%, against ≤6% on H200). One line on 4K versus 2M pages on H200.
+CUDA: pageable versus pinned, Torch versus native-registered parity inset. B60: pageable versus Torch/XPU pin. Ascend: native-registered versus pageable, own panel, plus the remote-node cost on pinned D2H (~26%, against ≤6% on one H200; 17% on H200 with all eight GPUs copying, covered in the multi-device microbench). One line on 4K versus 2M pages on H200.
 
 ### Multiple accelerators (Arc Pro B60, H200, Ascend 910B4)
 
@@ -139,6 +139,10 @@ Capacity table per machine (checkpointing only vs checkpoint offload). Per machi
 #### Saved-activation offload, optimizer on the GPU
 
 Capacity table per machine (no checkpointing, no offload vs saved-activation offload; host-memory bound on H200). Per machine, Qwen3 and Qwen3.5 placement tables inside the capacity window (H200: 16K per GPU). Interpretation: binding doubles the pageable copy rate; pinning is still ~2.55× bound and the larger lever.
+
+#### Supporting H2D/D2H microbench, all GPUs copying
+
+One table per machine: all devices copying at once (one process per device) against one device alone, pinned and pageable, unbound and bound, per-device and total bandwidth. H200: pinned per GPU halves (GPU pairs share a PCIe switch uplink on this server; state it as consistent with the data until a one-GPU-per-switch run separates it from a host-bandwidth cap), pageable barely moves, and unbound pinned D2H is 17% slower than bound. Tie the ceiling to the ~27 GB/s pinned copies seen in 8-GPU training.
 
 ## APIs and popular frameworks
 

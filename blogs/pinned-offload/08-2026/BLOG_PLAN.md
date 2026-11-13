@@ -337,6 +337,7 @@ Headings stay **accelerator-neutral**. No “ZeRO” and no PR numbers in H2/H3 
 #### Optimizer offload
 #### Activation checkpoint offload, optimizer on the GPU
 #### Saved-activation offload, optimizer on the GPU
+#### Supporting H2D/D2H microbench, all GPUs copying
 ## APIs and popular frameworks
 ### PyTorch
 ### Hugging Face checkpoint hooks
@@ -370,7 +371,7 @@ Headings stay **accelerator-neutral**. No “ZeRO” and no PR numbers in H2/H3 
 - **hipHostRegister / IPEX** are not DeepSpeed #8283 APIs.
 - **Page size, H200 bound, all workloads (`job-20261027T132751Z`):** between 4K and 2M, the end-to-end pin speedup moves ≤0.08× for model-tensor, activation checkpoint, and saved-activation 8K–64K. The H2D/D2H copy speedup moves up to 0.17× (5.43× vs 5.26× H2D at 256 MiB; 5.87× vs 5.70× at 1 GiB), which is ≤3% relative (table in EXPERIMENTS_HANDOFF §6). Use this for the page-size claim: huge pages are not a pinning substitute and not a pinning enhancer on H200. Staging probe: no per-copy pinning syscalls on CUDA. Ascend's page-size result is separate and unverified.
 - **Host page size (huge pages), under “Host memory placement”:** do not present 2M pages as an alternative to, or an enhancer of, pinning. H200, bound (`job-20261027T132751Z`): 2M changes any end-to-end step time by ≤4% and the end-to-end pin speedup by ≤0.08× on every workload (the microbench D2H pageable arm moves 5%), and the staging probe found no per-copy pinning syscalls for pageable CUDA copies. The earlier unbound 2M gains (average −7% to −16%) were NUMA-balancing outliers and placement, not page size (`job-20261024T022512Z`, `032725Z`). Ascend 910B4: 2M pages bring pageable H2D near pinned in the microbench (~6.4 → ~23 GB/s), but that is unverified (see the Ascend note) and e2e is unmeasured. Say that, and that the mechanism differs by driver.
-- **NUMA, under Best practices:** bind the process to the accelerator's NUMA node. Ascend: a remote node costs pinned D2H ~26%. H200: ≤6%. Measure per platform; do not port the number.
+- **NUMA, under Best practices:** bind the process to the accelerator's NUMA node. Ascend: a remote node costs pinned D2H ~26%. H200: ≤6% with one GPU copying, 17% unbound vs bound with all eight copying. Measure per platform; do not port the number.
 - **Host memory placement (practitioner tip, H200 measured):**
   - With `kernel.numa_balancing=1` the kernel samples and migrates the pages of every large host buffer each step. Pinning offload buffers does not prevent this, because DeepSpeed's CPU Adam state is ordinary pageable memory. On H200 (Qwen3-8B, 4K pages) it cost 1.6–6.8M minor faults and 10–70 CPU-s of kernel time per step, in pinned and pageable runs alike.
   - Any explicit task policy (bind or preferred) turns it off. `numactl --membind=all` does that but leaves CPU and memory placement to the scheduler, which swung the same command between 7.4 and 8.8 s/step.
