@@ -73,7 +73,7 @@ With several ranks on one host, the ranks share host memory, sockets, and cores,
 
 | Workload | Pinning | NUMA binding | CPU threads | All |
 |----------|---------|--------------|-------------|-----|
-| Optimizer offload, Qwen3-32B | 1.70× | — | 1.51× | **3.10×** |
+| Optimizer offload, Qwen3-32B | 1.70× | 1.45× | 1.51× | **3.10×** |
 | Activation checkpoint offload, Qwen3-8B, 256K tokens per GPU | 1.24× | 1.13× | — | **1.24×** |
 | Saved-activation offload, Qwen3-8B, 16K tokens per GPU | 5.98× | 2.45× | — | **6.28×** |
 
@@ -81,13 +81,13 @@ With several ranks on one host, the ranks share host memory, sockets, and cores,
 
 | Workload | Pinning | NUMA binding | CPU threads | All |
 |----------|---------|--------------|-------------|-----|
-| Optimizer offload, Qwen3.5-27B | 1.62× | — | 1.55× | **2.83×** |
+| Optimizer offload, Qwen3.5-27B | 1.62× | 1.34× | 1.55× | **2.83×** |
 | Activation checkpoint offload, Qwen3.5-9B, 256K tokens per GPU | 1.22× | 1.12× | — | **1.22×** |
 | Saved-activation offload, Qwen3.5-9B, 16K tokens per GPU | 5.79× | 2.78× | — | **7.10×** |
 
 *Ascend 910B4 and Arc Pro B60 multi-device results: pending.* <!-- TODO: Ascend 910B4 and Arc Pro B60 multi-device tables. -->
 
-A dash means the setting was not varied alone: the activation workloads keep the optimizer on the GPU, so there is no host compute to thread, and optimizer offload was bound only together with setting threads (the two together: 1.94× on Qwen3-32B, 1.80× on Qwen3.5-27B). The activation rows pack 4K-token samples into each step.
+A dash means the setting does not apply: the activation workloads keep the optimizer on the GPU, so there is no host compute to thread. For optimizer offload, NUMA binding alone was measured with torchrun's one thread per rank; binding and threads together gave 1.94× on Qwen3-32B and 1.80× on Qwen3.5-27B. The activation rows pack 4K-token samples into each step.
 
 Because the starting point is unbound and pageable, the Pinning column also recovers some of the slowdown that binding fixes. Against a bound pageable run, as in the single-device tables, pinning alone was 1.10× for Qwen3-8B checkpoint offload and 2.56× (Qwen3-8B) and 2.55× (Qwen3.5-9B) for saved-activation offload.
 

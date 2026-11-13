@@ -322,6 +322,7 @@ On the 8×H200 server, ZeRO shards the optimizer state, so a 9B model trains com
 |----------------------------|--------|---------------|-------------|---------|
 | Qwen3-32B | `deepspeed --bind_cores_to_rank` | 15.41 s | 9.78 s | **1.58×** |
 | Qwen3-32B | `numactl` per rank, `OMP_NUM_THREADS=12` | 15.53 s | 9.73 s | **1.60×** |
+| Qwen3-32B | `numactl` per rank, `OMP_NUM_THREADS=1` | 20.84 s | 15.14 s | 1.38× |
 | Qwen3-32B | torchrun, unbound, `OMP_NUM_THREADS=12` | 20.02 s | 9.82 s | 2.04× |
 | Qwen3-32B | torchrun, unbound, default (`OMP_NUM_THREADS=1`) | 30.16 s | 17.73 s | 1.70× |
 
@@ -331,21 +332,23 @@ On the 8×H200 server, ZeRO shards the optimizer state, so a 9B model trains com
 |----------------------------|--------|---------------|-------------|---------|
 | Qwen3.5-27B | `deepspeed --bind_cores_to_rank` | 12.63 s | 8.01 s | **1.58×** |
 | Qwen3.5-27B | `numactl` per rank, `OMP_NUM_THREADS=12` | 12.60 s | 8.02 s | **1.57×** |
+| Qwen3.5-27B | `numactl` per rank, `OMP_NUM_THREADS=1` | 16.99 s | 12.39 s | 1.37× |
 | Qwen3.5-27B | torchrun, unbound, `OMP_NUM_THREADS=12` | 14.67 s | 8.90 s | 1.65× |
 | Qwen3.5-27B | torchrun, unbound, default (`OMP_NUM_THREADS=1`) | 22.71 s | 13.98 s | 1.62× |
 
-<!-- 8xH200 optimizer offload: job-20261111T024327Z, bench_8gpu.py (DSE 1bd3ad4) --zero2_offload --cpu_optimizer AdamW, one packed 4096-token sample per GPU, gradient checkpointing, Liger fused linear CE + TiledMLP x4; arm = offload_optimizer.pin_memory, native pin backend; mean of 2 runs x 10 timed steps; kernel.numa_balancing=1. Controls (ZeRO-2, GPU AdamW): Qwen3-32B out of memory; Qwen3.5-27B 2.96 s, 112.8 GB allocated / 125.3 GB reserved. Host 579 GiB (32B) and 491 GiB (27B) pod-wide. -->
+<!-- 8xH200 optimizer offload: job-20261111T024327Z, bench_8gpu.py (DSE 1bd3ad4) --zero2_offload --cpu_optimizer AdamW, one packed 4096-token sample per GPU, gradient checkpointing, Liger fused linear CE + TiledMLP x4; arm = offload_optimizer.pin_memory, native pin backend; mean of 2 runs x 10 timed steps; binding alone (numactl per rank, OMP_NUM_THREADS=1) is job-20261113T112753Z; kernel.numa_balancing=1. Controls (ZeRO-2, GPU AdamW): Qwen3-32B out of memory; Qwen3.5-27B 2.96 s, 112.8 GB allocated / 125.3 GB reserved. Host 579 GiB (32B) and 491 GiB (27B) pod-wide. -->
 
 This is the one workload where pinning is not clearly the biggest lever, because CPU Adam is host compute, not copying. From torchrun's defaults, each lever alone sped up the Qwen3-32B step by:
 
 - **Threads** (`OMP_NUM_THREADS=12`): 1.51×.
+- **Binding** (per-rank `numactl`, one thread): 1.45×.
 - **Pinning:** 1.70×.
 - **Threads plus binding:** 1.94×.
 - **All three:** 3.10×, from 30.16 s to 9.73 s.
 
-Qwen3.5-27B followed the same pattern: 1.55× for threads, 1.62× for pinning, 1.80× for threads plus binding, and 2.83× for all three.
+Qwen3.5-27B followed the same pattern: 1.55× for threads, 1.34× for binding, 1.62× for pinning, 1.80× for threads plus binding, and 2.83× for all three.
 
-The levers interact. With one thread, CPU Adam dominates the step, so pinning gains only 1.70×. Give it 12 threads and copies become a larger share, so pinning gains 2.04×. Then bind the ranks, which mostly speeds up pageable copies, and pinning's measured gain settles at 1.60×. With a good launch, pinning makes the offloaded step about 1.6× faster on both models.
+The levers interact. With one thread, CPU Adam dominates the step, so pinning gains only 1.70×. Give it 12 threads and copies become a larger share, so pinning gains 2.04×. Then bind the ranks, which mostly speeds up pageable copies, and pinning's measured gain settles at 1.60×. Binding also helps CPU Adam itself when it has one thread: the pinned step fell from 17.73 s to 15.14 s (13.98 to 12.39 s on Qwen3.5-27B), but with 12 threads it barely moved (9.82 to 9.73 s), so threads absorb most of what binding fixes. A likely reason is that binding's memory policy also turns off automatic NUMA balancing for CPU Adam's pageable state; we did not measure that separately. With a good launch, pinning makes the offloaded step about 1.6× faster on both models.
 
 `deepspeed --bind_cores_to_rank` sets each rank's thread count to the cores it hands out (12 here) and binds memory, and matched hand-tuned `numactl` with `OMP_NUM_THREADS=12`. For Qwen3.5-27B, offload still trades speed for headroom: with AdamW on the GPU its step takes 2.96 s, about 2.7× faster than the best offloaded step.
 
