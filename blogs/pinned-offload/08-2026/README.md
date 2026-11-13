@@ -142,7 +142,7 @@ Between unbound and bound runs, pinned saved-activation step times moved 4–8%,
 | Ascend 910B4 | Qwen3-4B, 2048 | 19.32 s | 13.16 s | **1.47×** |
 | Arc Pro B60 | <!-- TODO --> | | | |
 
-<!-- H200: job-20261024T171244Z, bound. Ascend: TODO bound rerun; in the unbound data, seq 2048 pageable was faster than seq 1024 pageable — check whether that persists. -->
+<!-- H200: job-20261107T043012Z, bound to GPU0's node (unbound in the same job: 14.82 -> 4.09 s, 3.62x). Ascend: TODO bound rerun; in the unbound data, seq 2048 pageable was faster than seq 1024 pageable — check whether that persists. -->
 
 <!-- FIGURE: media/model_tensor_qwen3_5.png — own chart, never beside Qwen3. -->
 
@@ -194,7 +194,7 @@ The H200 rows are at 256K tokens, where offload starts to matter on one GPU; the
 | Ascend 910B4 | Qwen3-4B, 8K | 15.44 s | 12.60 s | **1.23×** |
 | Arc Pro B60 | <!-- TODO --> | | | |
 
-<!-- H200 256K: job-20261111T160827Z, bound to node 0, mean of 2 runs x 10 timed steps; unbound 57.03 -> 46.07 s (1.24x, 1 run). Packed 4096-token samples, cpu_checkpointing with async copies (ds_async), ZeRO-2 + CPU AdamW, bench_8gpu.py --nproc 1; peak device memory 66.1 GB. Capacity (job-20261111T144343Z): checkpointing alone 136.1 GB at 262,144, out of memory at 294,912. 320K (same job): 62.73 -> 55.03 s, 1.14x bound; 65.30 -> 56.48 s unbound. Superseded copy-cost row, a length where offload is not needed: 64K dense, HF checkpoint hook, 32.60 -> 28.97 s, 1.13x, job-20261024T171244Z, 44.7 GB. Ascend: TODO bound rerun. -->
+<!-- H200 256K: job-20261111T160827Z, bound to node 0, mean of 2 runs x 10 timed steps; unbound 57.03 -> 46.07 s (1.24x, 1 run). Packed 4096-token samples, cpu_checkpointing with async copies (ds_async), ZeRO-2 + CPU AdamW, bench_8gpu.py --nproc 1; peak device memory 66.1 GB. Capacity (job-20261111T144343Z): checkpointing alone 136.1 GB at 262,144, out of memory at 294,912. 320K (same job): 62.73 -> 55.03 s, 1.14x bound; 65.30 -> 56.48 s unbound. Superseded copy-cost row, a length where offload is not needed: 64K dense, HF checkpoint hook, 32.60 -> 28.97 s, 1.13x, job-20261107T043012Z, 50.6 GB peak. Ascend: TODO bound rerun. -->
 
 <!-- FIGURE: media/activation_checkpoint_qwen3_5.png — own chart, never beside Qwen3. -->
 
@@ -257,7 +257,7 @@ Each row is the longest sequence we ran on that machine.
 | Ascend 910B4 | Qwen3-4B, 2K | 9.48 s | 8.34 s | **1.14×** |
 | Arc Pro B60 | <!-- TODO: Qwen3-0.6B or 1.7B, 2K --> | | | |
 
-<!-- H200 64K: job-20261024T171244Z, bound. Peak device memory 125.1 GB (job-20261011T171729Z), cited in prose. Shorter H200 rows (not printed, bound, job-20261026T133233Z): 8K/16K/32K 3.03x/3.32x/3.25x. Ascend: TODO bound rerun. -->
+<!-- H200 64K: job-20261107T202125Z, bound to GPU0's node, mean of 2 run medians (91.62 / 90.81 -> 33.24 / 33.26 s); unbound in the same job 3.85x. Peak device memory 96.2 GB allocated / 125.1 GB reserved (same job). Shorter H200 rows (not printed, bound, same job): 8K/16K/32K 2.98x/3.26x/3.17x. Ascend: TODO bound rerun. -->
 
 <!-- FIGURE: media/saved_activation_qwen3_5.png — own chart, never beside Qwen3. -->
 
