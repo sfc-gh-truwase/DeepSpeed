@@ -85,7 +85,7 @@ H200 model-tensor used `deepspeed.zero.Init` (not the ~27 bytes/param no-Init pl
 4. Saved-activation offload (peer publish application; H200 is required, GH200 optional): `python saved_activation_offload/bench.py --model Qwen/Qwen3-8B --offload-optimizer --act-mem-opt --offload-tensors -1 --credits 1 --prefetch 2` on H200, pin T/F, seq 8K/16K/32K/64K (add `--discover-calib-seqs 4096 8192` at seq ≥32K). GH200 was measured at `N=2`; keep that label and do not copy the H200 ratio. ZeRO-2 CPU AdamW; pin toggles activation buffers and optimizer host buffers. Qwen3.5-9B is required (own chart). The script is accelerator-agnostic (DeepSpeed accelerator abstraction). B60 is required: Qwen3 (same ID as B60 model-tensor), batch 1, seq 2048, same flags, pin T/F; Qwen3.5-0.8B/2B own chart; named limitation (commit + error) only if it actually fails on XPU. Ascend 910B4 is required and collected (Qwen3-4B, batch 1, seq 2048, 1.14×). Full details in `SAVED_ACTIVATION_OFFLOAD_PLAN.md` §10.
 5. Ascend 910B4 (required, already measured): model-tensor Qwen3-4B batch 1 seq 1024 and seq 2048; activation checkpoint workload Qwen3-4B batch 1 seq 8192; H2D/D2H native-registered vs pageable at 256 MiB. Qwen3.5-4B model-tensor is collected.
 6. GH200 (`ds-pin-Xinyu-experiment.pdf`, `galleon` GPU0, node 0, Examples `5b16fe4`, October 2026): H2D/D2H, activation checkpoint, and saved-activation are measured. Model-tensor is not in the PDF; GH200 is optional so it does not block. Do not copy PCIe or H200 numbers. The PDF’s DeepNVMe figure is out of scope.
-7. **Ascend 910B4 and B60 placement, threads, and multi-device (required, user 2026-11-13).** Match the H200 set before publishing. Single device: one unbound arm per workload next to the bound rerun (same job), recording `numa_balancing`. Multiple devices, all in one host: (a) optimizer offload, pin × launch (unbound, per-rank `numactl`, `deepspeed --bind_cores_to_rank`, torchrun `--numa-binding=node` where supported) × `OMP_NUM_THREADS` (1 vs cores per rank), with models sized so device AdamW does not fit or barely fits; (b) activation checkpoint offload with the optimizer on the device: capacity wall (checkpointing only vs `cpu_checkpointing`), then pin × placement at a length where checkpointing alone does not fit; (c) saved-activation offload with the optimizer on the device: capacity wall (no checkpointing vs offload), then pin × placement inside the window. Harnesses: `activation_offload/bench_8gpu.py --numa_bind`, `saved_activation_offload/bench.py` under torchrun with `numa_bind_rank.sh`. Qwen3 and Qwen3.5, 10 timed steps, 1 warmup, NaN filter.
+7. **Ascend 910B4 and B60 placement, threads, and multi-device (required, user 2026-11-13).** See §2b for the reference set, shape rules, harness status, and per-cell rules. Match the H200 set before publishing. Single device: one unbound arm per workload next to the bound rerun (same job), recording `numa_balancing`. Multiple devices, all in one host: (a) optimizer offload, pin × launch (unbound, per-rank `numactl`, `deepspeed --bind_cores_to_rank`, torchrun `--numa-binding=node` where supported) × `OMP_NUM_THREADS` (1 vs cores per rank), with models sized so device AdamW does not fit or barely fits; (b) activation checkpoint offload with the optimizer on the device: capacity wall (checkpointing only vs `cpu_checkpointing`), then pin × placement at a length where checkpointing alone does not fit; (c) saved-activation offload with the optimizer on the device: capacity wall (no checkpointing vs offload), then pin × placement inside the window. Harnesses: `activation_offload/bench_8gpu.py --numa_bind`, `saved_activation_offload/bench.py` under torchrun with `numa_bind_rank.sh`. Qwen3 and Qwen3.5, 10 timed steps, 1 warmup, NaN filter.
 
 **Do not** reuse DeepSpeed #8282 async-vs-blocking (pinned pool) as pin vs pageable. **Do not** reuse #8283 H200 GB/s as the only H2D/D2H figure if you can remeasure with the pageable arm.
 
@@ -205,6 +205,51 @@ env $E numactl --cpunodebind=$N --preferred=$N python $B/model_tensor_offload/be
 - **Huge pages are never presented as a replacement for pinning** unless e2e pin speedup at 2M is within noise of 1.0x on that SKU.
 
 ---
+
+## 2b. Ascend 910B4 and Arc Pro B60: collecting the single- and multi-device matrix (2026-11-13)
+
+**Goal:** an Ascend 910B4 row and an Arc Pro B60 row for every H200 cell below, so the blog's single-device and multi-device tables get both columns. Match the H200 method exactly. Where a SKU cannot run a cell, return the command, the DeepSpeed and DeepSpeedExamples commits, and the error instead of skipping it. Return tables and job IDs to the blog owner; do not edit the README.
+
+### H200 reference set (what to match)
+
+| Devices | Workload | H200 shape | Arms | H200 jobs |
+|---------|----------|------------|------|-----------|
+| 1 | Model-tensor offload | ZeRO-3 parameter + optimizer CPU offload, Qwen3-8B / Qwen3.5-9B, 4096 tokens | pinned (native) vs pageable; bound and unbound | `20261107T043012Z` |
+| 1 | Activation checkpoint offload | `activation_offload/bench_8gpu.py --nproc 1 --zero2_offload --modes ds_async`, packed 4096-token samples, 256K tokens | pinned vs pageable (activation pool + optimizer buffers together); bound and unbound | `20261111T160827Z`, `20261111T171212Z`; capacity `20261111T144343Z` |
+| 1 | Saved-activation offload | `--offload-optimizer --act-mem-opt --offload-tensors -1 --credits 1 --prefetch 2`, 64K tokens | pinned vs pageable; bound and unbound | `20261107T202125Z` |
+| 1 | Host-device copies | `h2d_d2h/bench.py`, 256 MiB, written buffers | pageable, torch, native-unregistered, native-registered | `20261024T171244Z`, `20261023T131838Z` |
+| N | Optimizer offload | ZeRO-2 + CPU Adam, 4096 tokens per device, the family's two largest models (H200: Qwen3-32B, Qwen3.5-27B) | pinned vs pageable × launch: torchrun `OMP_NUM_THREADS=1`; torchrun `OMP_NUM_THREADS=<cores per rank>`; per-rank `numactl` with 1 thread (binding alone); per-rank `numactl` with cores-per-rank threads; `deepspeed --bind_cores_to_rank`; plus a ZeRO-2 GPU-AdamW control | `20261111T024327Z`; binding alone `20261113T112753Z` |
+| N | Activation checkpoint offload | ZeRO-2 GPU AdamW, packed 4096-token samples, `ds_async`; capacity walls, then pin × placement at one length inside the window | placements: unbound, per-rank `numactl`, torchrun `--numa-binding=node`, `deepspeed --bind_cores_to_rank` | walls `20261110T002045Z`, `20261110T011111Z`; placement `20261112T192249Z` |
+| N | Saved-activation offload | `saved_activation_offload/bench.py --zero2-gpu` under torchrun; capacity walls (vs `--mode none`), then pin × placement inside the window | same four placements | walls `20261110T200243Z`, `20261110T213152Z`; placement `20261110T223544Z` |
+| N | Host-device copies | one `h2d_d2h/bench.py` process per device, all copying at once, plus a one-device baseline in the same job | pageable vs native-registered; bound and unbound | `20261113T091012Z` |
+
+### Choosing shapes on smaller devices (do not copy H200 lengths)
+
+- **Size with fp32 optimizer state:** fp32 master weights plus Adam moments are 12 bytes per parameter. ZeRO-2 and ZeRO-3 shard them across ranks.
+- **Activation workloads, single and multi-device:** use a length where offload is needed. Plain checkpointing (or, for saved-activation offload, training without checkpointing) must run out of device memory, or fit within about 5% of usable HBM, while the offload arm fits. Find the wall first with a short ladder at one timed step per cell, and report the last passing and first failing lengths with the failure type.
+- **Optimizer offload, multi-device:** use the largest models in the family for which ZeRO-2 with GPU AdamW runs out of memory, or sits within about 10% of usable HBM, and run that GPU-AdamW control cell. If GPU AdamW fits with room to spare, offload is not justified for that model; say so.
+- **Host RAM:** the offloaded volume times the number of ranks must fit with margin. On H200, saved-activation offload held about 7.3 MB (Qwen3-8B) and 9.1 MB (Qwen3.5-9B) of host buffers per token per rank, and its capacity was host-bound.
+- **One length per workload for the pin × placement matrix,** inside the capacity window for every model on that SKU.
+
+### Harness status per SKU (read before running)
+
+- **Accelerator-agnostic:** `saved_activation_offload/bench.py` and `h2d_d2h/bench.py` use DeepSpeed's accelerator abstraction. Saved-activation offload runs under torchrun with `--zero2-gpu` (DSE `53096d8`). Ranks refuse to run discovery, so prepare manifests once with `--prepare-seqs` and `--discover-calib-seqs`.
+- **CUDA-only today:** `activation_offload/bench_8gpu.py`, used for the multi-device activation checkpoint and optimizer offload cells and for the single-device 256K rows. It makes 22 `torch.cuda` calls for memory statistics, and its `--numa_bind node` uses `nvidia-smi`. Port those to `get_accelerator()` before Ascend or B60 runs, or report a named limitation.
+- **Per-rank binding:** `benchmarks/pin_memory/numa_bind_rank.sh` and `bench_8gpu.py --numa_bind node` map each rank to its device's NUMA node through `nvidia-smi` and `CUDA_VISIBLE_DEVICES`. On Ascend, use the NPU's PCI `numa_node` with `ASCEND_RT_VISIBLE_DEVICES`. On B60, use the GPU's PCI `numa_node` with `ZE_AFFINITY_MASK`. Confirm the result with `numactl --show` inside a rank.
+- **`torchrun --numa-binding`:** we used it on CUDA only. Check that it works on your device; if it does not, report the cell as not available.
+- **`deepspeed --bind_cores_to_rank`:** device-agnostic, but it splits cores by local rank order, not by device. Check that device numbering follows NUMA order on your host, and report the mapping.
+- **Pinned arm:** Ascend uses native-registered pinning (`aclrtHostRegisterV2`; parity with Torch's pinning is unmeasured). B60 uses Torch's XPU pinning (`--skip-native-register`), because native has no XPU registration hook and would copy at pageable speed.
+
+### Per-cell rules (same as H200)
+
+- **Steps:** end-to-end cells use 10 timed steps after 1 warmup, with 2 repeats. Microbenchmarks report the median of 3. When several devices copy at once, size the iterations so each timed window lasts tens of seconds (H200: 4000 iterations pinned and 800 pageable at 256 MiB), or start-up jitter will keep the windows from overlapping.
+- **Verdict:** take it from the result record's `ok` field and a finite loss, never from the exit code. Exclude runs with NaN or Inf loss (see the NaN filter). Use seeded weights (DSE `aa84be8` or later).
+- **Placement:** bound means per-rank `numactl --cpunodebind=<node> --preferred=<node>`. Verify every rank's placement from the bench's `[affinity]` (CPUs, memory nodes, `OMP_NUM_THREADS`) and `[numa]` lines, counting distinct `local_rank` values, since concurrent prints can interleave.
+- **Record per SKU:** `kernel.numa_balancing`, `ulimit -l`, the DeepSpeed commit (and whether it is code-equivalent to upstream), the DeepSpeedExamples commit, the host CPU, the device-to-node map, and which devices share a PCIe switch or uplink (on H200, GPU pairs share one, which halves pinned bandwidth per GPU when all eight copy).
+
+### What to return
+
+For every cell: SKU, device count, model, shape, placement, threads, arm, per-repeat step times for both arms, peak device memory, host footprint, losses, job ID, and commits. For capacity walls: last passing and first failing length, with the failure type (device OOM or host kill). Use the same table shapes as the H200 rows in the blog.
 
 ## 3. Suggested agent sequence
 
