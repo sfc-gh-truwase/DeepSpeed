@@ -8,6 +8,10 @@ Blocks publish:
   placeholders), the Qwen3.5-4B saved-activation row, and the multi-device results, including all-NPU copy bandwidth.
 - 8×H200 torchrun --numa-binding=node with 12 threads for optimizer offload, to fill the launcher table's torchrun
   cells without numactl (EXPERIMENTS_HANDOFF.md section 2, item 8).
+- Single-device rows (H200, Ascend, B60) and one-device copies rerun under launcher binding instead of numactl
+  (EXPERIMENTS_HANDOFF.md section 2, item 10).
+- 8×H200 all-GPU copy benchmark rerun under each launcher's own binding instead of per-rank numactl
+  (EXPERIMENTS_HANDOFF.md section 2, item 9).
 - Figures (media/) and the contributor list.
 - Link to the arXiv version once it is posted.
 -->
@@ -39,7 +43,7 @@ We evaluated four workloads. The first measures the copies themselves; the other
 
 On a single device, the two activation workloads also offload the optimizer, and pinning covers its host buffers too. The multi-device activation runs keep the optimizer on the accelerator.
 
-We ran them on three accelerator types: NVIDIA H200, Huawei Ascend 910B4, and Intel Arc Pro B60, each within a single host (multi-node runs were not tested). Each training workload uses two Hugging Face model families in separate tables: Qwen3 (dense) and Qwen3.5 (hybrid linear and full attention), randomly initialized, in bf16, at batch size 1. Model size and sequence length differ by machine, so compare results within a column, not across columns. The full report lists hardware and software versions. Single-device runs and the copy benchmark are bound to the accelerator's NUMA node with `numactl`; multi-device runs use only each launcher's own binding.
+We ran them on three accelerator types: NVIDIA H200, Huawei Ascend 910B4, and Intel Arc Pro B60, each within a single host (multi-node runs were not tested). Each training workload uses two Hugging Face model families in separate tables: Qwen3 (dense) and Qwen3.5 (hybrid linear and full attention), randomly initialized, in bf16, at batch size 1. Model size and sequence length differ by machine, so compare results within a column, not across columns. The full report lists hardware and software versions. Every run is bound to the accelerator's NUMA node using only a launcher's own binding, never an external tool. <!-- TODO: single-device rows and the one-device copy cells are still from numactl-bound runs; replace with the launcher-bound rerun (EXPERIMENTS_HANDOFF.md section 2, item 10). -->
 
 ### Single device: pinning
 
@@ -97,7 +101,7 @@ Offload is also what makes these runs fit. With the optimizer on the GPU, checkp
 
 ### Host-device copies
 
-The step-time gains come from faster copies. The table gives the pinned speedup for 256 MiB copies in each direction, per device, bound to the accelerator's NUMA node, with one device copying and with every device in the host copying at once (eight on the H200 server).
+The step-time gains come from faster copies. The table gives the pinned speedup for 256 MiB copies in each direction, per device, bound to the accelerator's NUMA node, with one device copying and with every device in the host copying at once (eight on the H200 server, bound by DeepSpeed's launcher).
 
 <!-- FIGURE: media/h2d_d2h.png — pinned speedup per direction, one panel per machine, one device and all devices copying. -->
 
@@ -110,7 +114,7 @@ The step-time gains come from faster copies. The table gives the pinned speedup 
 | Arc Pro B60 | Host to device | *pending* | *pending* |
 | Arc Pro B60 | Device to host | *pending* | *pending* |
 
-<!-- Sources: ARXIV_DRAFT.md single-device and all-GPUs-copying microbench tables. H200 one device: 10.2 -> 55.4 and 17.3 -> 54.9 GB/s; all eight, bound, per GPU: 8.6 -> 27.9 and 15.4 -> 26.4 GB/s. Ascend: 6.48 -> 25.97 and 6.71 -> 26.49 GB/s (unbound placeholder). -->
+<!-- Sources: ARXIV_DRAFT.md single-device and all-GPUs-copying microbench tables. H200 one device: 10.2 -> 55.4 and 17.3 -> 54.9 GB/s; all eight, bound, per GPU: 8.6 -> 27.9 and 15.4 -> 26.4 GB/s. Ascend: 6.48 -> 25.97 and 6.71 -> 26.49 GB/s (unbound placeholder). TODO: the all-devices H200 cells and the 17% unbound-vs-bound sentence come from per-rank numactl (job-20261113T091012Z); replace with the rerun under deepspeed --bind_cores_to_rank (and report torchrun --numa-binding=node), EXPERIMENTS_HANDOFF.md section 2, item 9. -->
 
 Copy speedups are larger than step speedups because only part of a step is copying: on one H200, a 5.4× faster host-to-device copy became a 1.15× to 3.73× faster training step. With all eight H200 GPUs copying, pinned bandwidth per GPU halves while pageable bandwidth barely moves, so the speedup shrinks. On our server, GPUs share a PCIe switch uplink in pairs, and pageable copies are limited by CPU staging rather than the link. Pinned copies in eight-GPU training ran at the same ceiling as this benchmark. Placement also starts to reach pinned copies: unbound, pinned device-to-host copies were 17% slower than bound.
 
