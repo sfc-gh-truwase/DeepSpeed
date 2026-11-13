@@ -6,12 +6,8 @@ Blocks publish:
 - Intel Arc Pro B60: every result (single and multi-device) is not collected.
 - Ascend 910B4: bound reruns of the single-device rows and the copy bandwidth (current numbers are unbound
   placeholders), the Qwen3.5-4B saved-activation row, and the multi-device results, including all-NPU copy bandwidth.
-- 8×H200 torchrun --numa-binding=node with 12 threads for optimizer offload, to fill the launcher table's torchrun
-  cells without numactl (EXPERIMENTS_HANDOFF.md section 2, item 8).
 - Single-device rows (H200, Ascend, B60) and one-device copies rerun under launcher binding instead of numactl
   (EXPERIMENTS_HANDOFF.md section 2, item 10).
-- 8×H200 all-GPU copy benchmark rerun under each launcher's own binding instead of per-rank numactl
-  (EXPERIMENTS_HANDOFF.md section 2, item 9).
 - Figures (media/) and the contributor list.
 - Link to the arXiv version once it is posted.
 -->
@@ -71,7 +67,7 @@ Speedup is the pageable step time divided by the pinned step time, with both run
 
 ### Multiple devices: pinning, NUMA placement, and CPU threads
 
-With several ranks on one host, the ranks share host memory, sockets, and cores, so placement and threads start to matter alongside pinning. The tables below start from torchrun's defaults (ranks unbound, memory pageable, one OpenMP thread per rank), on 8×H200. Each number is the default step time divided by the step time with the named setting changed; **All** changes every setting that applies to the workload. NUMA binding and **All** use DeepSpeed's launcher binding.
+With several ranks on one host, the ranks share host memory, sockets, and cores, so placement and threads start to matter alongside pinning. The tables below start from torchrun's defaults (ranks unbound, memory pageable, one OpenMP thread per rank), on 8×H200. Each number is the default step time divided by the step time with the named setting changed; **All** changes every setting that applies to the workload. NUMA binding and **All** use DeepSpeed's launcher binding, except where noted below.
 
 <!-- FIGURE: media/levers.png — speedup from the default launch for each setting alone and all together, one group per workload, one panel per machine. -->
 
@@ -79,7 +75,7 @@ With several ranks on one host, the ranks share host memory, sockets, and cores,
 
 | Workload | Pinning | NUMA binding | CPU threads | All |
 |----------|---------|--------------|-------------|-----|
-| Optimizer offload, Qwen3-32B | 1.70× | *pending* | 1.51× | **3.08×** |
+| Optimizer offload, Qwen3-32B | 1.70× | 0.89× | 1.51× | **3.08×** |
 | Activation checkpoint offload, Qwen3-8B, 256K tokens per GPU | 1.24× | 1.13× | — | **1.24×** |
 | Saved-activation offload, Qwen3-8B, 16K tokens per GPU | 5.98× | 2.49× | — | **6.29×** |
 
@@ -87,13 +83,13 @@ With several ranks on one host, the ranks share host memory, sockets, and cores,
 
 | Workload | Pinning | NUMA binding | CPU threads | All |
 |----------|---------|--------------|-------------|-----|
-| Optimizer offload, Qwen3.5-27B | 1.62× | *pending* | 1.55× | **2.84×** |
+| Optimizer offload, Qwen3.5-27B | 1.62× | 1.07× | 1.55× | **2.84×** |
 | Activation checkpoint offload, Qwen3.5-9B, 256K tokens per GPU | 1.22× | 1.12× | — | **1.22×** |
 | Saved-activation offload, Qwen3.5-9B, 16K tokens per GPU | 5.79× | 2.78× | — | **7.14×** |
 
 *Ascend 910B4 and Arc Pro B60 multi-device results: pending.* <!-- TODO: Ascend 910B4 and Arc Pro B60 multi-device tables. -->
 
-A dash means the setting does not apply: the activation workloads keep the optimizer on the GPU, so there is no host compute to thread. For optimizer offload, DeepSpeed's launcher always sets threads along with binding, so binding alone waits on a run with torchrun's own binding; binding and threads together gave 1.96× on Qwen3-32B and 1.80× on Qwen3.5-27B. The activation rows pack 4K-token samples into each step.
+A dash means the setting does not apply: the activation workloads keep the optimizer on the GPU, so there is no host compute to thread. DeepSpeed's launcher always sets threads along with binding, so optimizer-offload binding alone uses `torchrun --numa-binding=node` with one thread, measured against the default launch in the same job. It did not help (0.89× and 1.07×), because torchrun binds cores but not memory. DeepSpeed's binding and threads together gave 1.96× on Qwen3-32B and 1.80× on Qwen3.5-27B. The activation rows pack 4K-token samples into each step.
 
 Because the starting point is unbound and pageable, the Pinning column also recovers some of the slowdown that binding fixes. Against a pageable run bound by DeepSpeed's launcher, pinning alone was 1.10× for Qwen3-8B checkpoint offload and 2.53× (Qwen3-8B) and 2.57× (Qwen3.5-9B) for saved-activation offload.
 
@@ -107,23 +103,23 @@ The step-time gains come from faster copies. The table gives the pinned speedup 
 
 | Machine | Direction | One device copying | All devices copying |
 |---------|-----------|--------------------|---------------------|
-| H200 | Host to device | **5.4×** | **3.2×** |
+| H200 | Host to device | **5.4×** | **3.3×** |
 | H200 | Device to host | **3.2×** | **1.7×** |
 | Ascend 910B4 | Host to device | **4.0×** | *pending* |
 | Ascend 910B4 | Device to host | **3.9×** | *pending* |
 | Arc Pro B60 | Host to device | *pending* | *pending* |
 | Arc Pro B60 | Device to host | *pending* | *pending* |
 
-<!-- Sources: ARXIV_DRAFT.md single-device and all-GPUs-copying microbench tables. H200 one device: 10.2 -> 55.4 and 17.3 -> 54.9 GB/s; all eight, bound, per GPU: 8.6 -> 27.9 and 15.4 -> 26.4 GB/s. Ascend: 6.48 -> 25.97 and 6.71 -> 26.49 GB/s (unbound placeholder). TODO: the all-devices H200 cells and the 17% unbound-vs-bound sentence come from per-rank numactl (job-20261113T091012Z); replace with the rerun under deepspeed --bind_cores_to_rank (and report torchrun --numa-binding=node), EXPERIMENTS_HANDOFF.md section 2, item 9. -->
+<!-- Sources: ARXIV_DRAFT.md single-device and all-GPUs-copying microbench tables. H200 one device: 10.2 -> 55.4 and 17.3 -> 54.9 GB/s; all eight under deepspeed --bind_cores_to_rank, per GPU: 8.57 -> 27.91 and 15.00 -> 26.18 GB/s (job-20261113T151443Z; torchrun --numa-binding=node 8.62 -> 28.00 and 15.03 -> 26.30; torchrun unbound pinned D2H 21.22 GB/s, 19% below DeepSpeed's launcher). Ascend: 6.48 -> 25.97 and 6.71 -> 26.49 GB/s (unbound placeholder). -->
 
-Copy speedups are larger than step speedups because only part of a step is copying: on one H200, a 5.4× faster host-to-device copy became a 1.15× to 3.73× faster training step. With all eight H200 GPUs copying, pinned bandwidth per GPU halves while pageable bandwidth barely moves, so the speedup shrinks. On our server, GPUs share a PCIe switch uplink in pairs, and pageable copies are limited by CPU staging rather than the link. Pinned copies in eight-GPU training ran at the same ceiling as this benchmark. Placement also starts to reach pinned copies: unbound, pinned device-to-host copies were 17% slower than bound.
+Copy speedups are larger than step speedups because only part of a step is copying: on one H200, a 5.4× faster host-to-device copy became a 1.15× to 3.73× faster training step. With all eight H200 GPUs copying, pinned bandwidth per GPU halves while pageable bandwidth barely moves, so the speedup shrinks. On our server, GPUs share a PCIe switch uplink in pairs, and pageable copies are limited by CPU staging rather than the link. Pinned copies in eight-GPU training ran at the same ceiling as this benchmark. Placement also starts to reach pinned copies: unbound, pinned device-to-host copies were 19% slower than under either launcher's binding.
 
 ### What the results show
 
 - **Pinning is the biggest single lever when the step is copy-bound.** From torchrun's defaults, it alone made 8-GPU saved-activation offload 5.98× faster, against 2.49× for NUMA binding alone. Against a bound pageable run it was still 2.53×.
 - **When the CPU computes, threads matter as much as pinning.** With the optimizer offloaded, CPU Adam is host compute that pinning cannot speed up. Giving it 12 threads per rank was worth 1.51×, close to pinning's 1.70×, and all three settings together gave 3.08×.
 - **Pinning makes placement matter less, not zero.** On the H200, binding moved the pageable step by up to 2.8× and the pinned step by about 5% or less, except on Qwen3.5: 23% for saved-activation offload and 11% for optimizer offload. An unbound comparison can overstate the benefit of pinning by up to 2.4×. On the Ascend, a remote NUMA node still slowed pinned device-to-host copies by about 26%.
-- **Shared links cap multi-device copies.** On our 8×H200 server, pinned copy bandwidth per GPU halved when all eight GPUs copied, while pageable bandwidth barely moved, so the per-GPU pin advantage shrank from 5.4× to 3.2× host to device.
+- **Shared links cap multi-device copies.** On our 8×H200 server, pinned copy bandwidth per GPU halved when all eight GPUs copied, while pageable bandwidth barely moved, so the per-GPU pin advantage shrank from 5.4× to 3.3× host to device.
 - **Registration, not page-locking, makes host memory fast.** On the H200, memory that was locked but not registered with the device driver copied at pageable speed.
 - **Some settings did not help.** On the H200, huge pages and the choice of pinning backend changed step time by at most 4% once placement was fixed and memory registered.
 
@@ -145,15 +141,15 @@ In short, DeepSpeed provides everything practitioners need to maximize offload p
 | Workload, 8×H200 | torchrun | DeepSpeed launcher |
 |------------------|----------|--------------------|
 | Optimizer offload, Qwen3-32B | 3.07× | 3.08× |
-| Optimizer offload, Qwen3.5-27B | 2.55× | **2.84×** |
+| Optimizer offload, Qwen3.5-27B | 2.83× | 2.84× |
 | Activation checkpoint offload, Qwen3-8B | 1.24× | 1.24× |
 | Activation checkpoint offload, Qwen3.5-9B | 1.22× | 1.22× |
 | Saved-activation offload, Qwen3-8B | 6.28× | 6.29× |
 | Saved-activation offload, Qwen3.5-9B | 7.12× | 7.14× |
 
-<!-- From the ARXIV_DRAFT.md 8xH200 tables, DeepSpeed pinning on in both columns (pinned was the best arm for both launchers). Baseline = torchrun unbound pageable OMP_NUM_THREADS=1 (30.16, 22.71, 53.46, 50.07, 58.17, 80.72 s). torchrun = best of unbound and --numa-binding=node (activation workloads), and unbound with OMP_NUM_THREADS=12 (optimizer offload; --numa-binding was not run there): 9.82, 8.90, 43.01, 41.09, 9.27, 11.33 s. At torchrun's default one thread, optimizer offload was 17.73 s (1.70x) and 13.98 s (1.62x). DeepSpeed = deepspeed --bind_cores_to_rank: 9.78, 8.01, 42.97, 41.04, 9.25, 11.30 s. Pageable-only best, torchrun vs DeepSpeed: 1.00/1.96, 1.00/1.80, 1.01/1.13, 1.02/1.12, 1.53/2.49, 1.37/2.78. TODO: replace the torchrun optimizer-offload cells with --numa-binding=node plus OMP_NUM_THREADS=12 if better; that run is pending (EXPERIMENTS_HANDOFF.md section 2, item 8). -->
+<!-- From the ARXIV_DRAFT.md 8xH200 tables, DeepSpeed pinning on in both columns (pinned was the best arm for both launchers). Baseline = torchrun unbound pageable OMP_NUM_THREADS=1 (30.16, 22.71, 53.46, 50.07, 58.17, 80.72 s). torchrun = best of unbound and --numa-binding=node (activation workloads: 43.01, 41.09, 9.27, 11.33 s). For optimizer offload, torchrun = --numa-binding=node with OMP_NUM_THREADS=12 from job-20261113T151443Z, scaled to the baseline job by DeepSpeed's launcher in the same job (Qwen3-32B 9.75 vs 9.71 s, Qwen3.5-27B 8.01 vs 7.97 s: 3.08x * 9.71/9.75 = 3.07x, 2.84x * 7.97/8.01 = 2.83x). Unbound with 12 threads was 9.82 and 8.90 s (3.07x, 2.55x); at torchrun's default one thread, 17.73 s (1.70x) and 13.98 s (1.62x). DeepSpeed = deepspeed --bind_cores_to_rank: 9.78, 8.01, 42.97, 41.04, 9.25, 11.30 s. Pageable-only, torchrun vs DeepSpeed: optimizer offload 18.13 vs 15.35 s and 14.44 vs 12.61 s (job-20261113T151443Z); activation workloads 1.01/1.13, 1.02/1.12, 1.53/2.49, 1.37/2.78 (speedup over the baseline). -->
 
-The launchers tie on the activation workloads, where pinning does most of the work, and on Qwen3-32B optimizer offload once torchrun's thread count is set by hand. On Qwen3.5-27B optimizer offload, DeepSpeed's launcher leads because it also binds each rank's memory. DeepSpeed's launcher sets the thread count itself; torchrun leaves CPU Adam on one thread unless the user changes it.
+The launchers tie on every workload once memory is pinned and torchrun's thread count is set by hand: with pinned memory, torchrun's core-only binding does as well as DeepSpeed's. Without pinning, DeepSpeed's launcher is faster because it also binds each rank's memory: 15.35 s against 18.13 s per step on Qwen3-32B optimizer offload, and up to 2.0× on saved-activation offload. DeepSpeed's launcher sets the thread count itself; torchrun leaves CPU Adam on one thread unless the user changes it.
 
 DeepSpeed's binding assumes accelerators are numbered in NUMA order; on hosts where they are not, bind ranks manually. The [full technical report](ARXIV_DRAFT.md) lists the flags and settings for each framework.
 
