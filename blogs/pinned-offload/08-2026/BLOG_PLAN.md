@@ -244,6 +244,7 @@ Writer constraints for this script:
 | Saved-activation offload (`saved_activation_offload/bench.py --offload-optimizer`) | One high-end CUDA PCIe (H200) | Qwen3-8B; batch 1; seq 8K/16K/32K/64K; ZeRO-2 CPU AdamW; pin T/F; `N=1`, `M=2`, `--offload-tensors -1` | step time, offloaded bytes, peak HBM |
 | Saved-activation offload (`saved_activation_offload/bench.py`, same flags as H200) | Intel Arc Pro B60 | Qwen3 0.6B/1.7B; batch 1; seq 2048; ZeRO-2 CPU AdamW; pin T/F; required, not yet collected | step time |
 | H2D/D2H microbench (`h2d_d2h/bench.py`) | One high-end CUDA (H200) | **pageable vs pinned** primary; Torch vs native-unregistered vs native-registered as CUDA parity inset | GB/s; `torch.is_pinned()` vs DeepSpeed-managed pin |
+| H2D/D2H microbench, multi-device (`h2d_d2h/bench.py`, one process per GPU) | 8×H200 | all 8 GPUs vs 1, pageable vs native-registered, unbound vs bound, 256 MiB | GB/s per GPU and total; collected `job-20261113T091012Z` (pinned per GPU halves to 27.9 GB/s: GPU pairs share a PCIe switch uplink) |
 | H2D/D2H microbench (`h2d_d2h/bench.py`) | Intel Arc Pro B60 | pageable vs Torch/XPU pin (`--skip-native-register`) | GB/s |
 | Model-tensor CPU offload (`model_tensor_offload/bench.py`) | Ascend 910B4 | Qwen3-4B; batch 1; seq 1024 and seq 2048; unpinned vs pinned | step time / tok/s |
 | Activation checkpoint workload (`activation_offload/bench.py --offload-optimizer --act-mem-opt`) | Ascend 910B4 | Qwen3-4B; batch 1; seq 8192; pin T/F; async on | ms/step, tok/s, accelerator peak |

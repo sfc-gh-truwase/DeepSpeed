@@ -429,6 +429,21 @@ Binding with a memory policy cut the pageable step by 2.5× (Qwen3-8B) and 2.8×
 
 <!-- 8xH200 saved-activation setup: ZeRO-2 + GPU AdamW (--zero2-gpu, fp32 master + Adam state), torchrun 8 ranks, published settings credits 1 / prefetch 2 / offload-tensors -1 / native pin backend, calibrated discovery 4096/8192; DSE 53096d8 (per-rank manifest device fix included). Walls: no-remat job-20261110T200243Z, offload job-20261110T213152Z (rerun after the fix). 16K matrix: job-20261110T223544Z, 10 timed steps after 1 warmup, mean of 2 run medians; numactl via benchmarks/pin_memory/numa_bind_rank.sh; kernel.numa_balancing=1. -->
 
+#### Supporting H2D/D2H microbench
+
+All eight GPUs copying at once, one process per GPU, against one GPU copying alone in the same job (256 MiB written buffers, median of 3 runs):
+
+| Arm | GPUs copying | Unbound: H2D / D2H per GPU | Bound: H2D / D2H per GPU | Bound: total H2D / D2H |
+|-----|--------------|----------------------------|--------------------------|------------------------|
+| Pinned | 1 | 55.4 / 55.0 GB/s | 55.4 / 55.0 GB/s | 55.4 / 55.0 GB/s |
+| Pinned | 8 | 27.9 / 21.9 GB/s | 27.9 / 26.4 GB/s | 223 / 211 GB/s |
+| Pageable | 1 | 10.3 / 15.6 GB/s | 10.2 / 17.2 GB/s | 10.2 / 17.2 GB/s |
+| Pageable | 8 | 8.5 / 14.2 GB/s | 8.6 / 15.4 GB/s | 69 / 123 GB/s |
+
+With all eight GPUs copying, pinned bandwidth per GPU halves. The H200's GPUs sit in pairs behind a shared PCIe switch, so each pair splits one Gen5 ×16 uplink, and the four uplinks carry about 223 GB/s host to device in total. Pageable copies are limited by each process's CPU-side staging rather than by the link, so they lose little (10.2 to 8.6 GB/s host to device). The pin advantage per GPU therefore shrinks from 5.4× to 3.2× host to device and from 3.2× to 1.7× device to host, which is one reason the multi-device pinning gains are smaller per GPU. Placement now reaches pinned copies too: unbound, pinned device-to-host copies fell to 21.9 GB/s against 26.4 GB/s bound, while with one GPU copying they were the same either way. In training, the pageable path does worse than in this microbench (about 7 and 5 GB/s per rank, unbound, in 8-GPU saved-activation offload), because the buffers are much larger and the CPUs are also busy, so the microbench understates what binding gives pageable training.
+
+<!-- 8xH200 H2D/D2H: job-20261113T091012Z. h2d_d2h/bench.py --arm pageable|native-registered --sizes-mib 256 --warmup 20, --iters 800 (pageable) / 4000 (pinned) so the eight timed windows overlap; one process per GPU (CUDA_VISIBLE_DEVICES=i), bound via benchmarks/pin_memory/numa_bind_rank.sh (8/8 binding lines per bound set); 1-GPU baseline on GPU0 in the same job; median of 3 per GPU, then mean across GPUs; per-GPU spread within +/-0.5 GB/s pinned and +/-1 GB/s pageable; pinned status verified on all 108 rows; kernel.numa_balancing=1. Topology from sysfs: GPU0/GPU1 share upstream switch 0000:44:00.0 -> 45:00.0, GPU2/GPU3 share 5d:00.0 -> 5e:00.0; every GPU link is Gen5 x16. -->
+
 ## APIs and popular frameworks
 
 ### PyTorch
@@ -593,6 +608,10 @@ DS_PIN_MEMORY_BACKEND=native $BIND python activation_offload/bench_8gpu.py --npr
 $BIND python saved_activation_offload/bench.py --model Qwen/Qwen3-8B --offload-optimizer --act-mem-opt \
   --offload-tensors -1 --credits 1 --prefetch 2 --batch 1 --seq 65536 --steps 10 --warmup 1 \
   --discover-calib-seqs 4096 8192
+
+# Copy bandwidth with all 8 GPUs copying (one process per GPU, each bound to its GPU's node; also run --arm pageable)
+for i in $(seq 0 7); do CUDA_VISIBLE_DEVICES=$i LOCAL_RANK=0 bash numa_bind_rank.sh python h2d_d2h/bench.py \
+  --arm native-registered --sizes-mib 256 --warmup 20 --iters 4000 & done; wait
 
 # Copy bandwidth (add --skip-native-register on XPU)
 $BIND python h2d_d2h/bench.py
