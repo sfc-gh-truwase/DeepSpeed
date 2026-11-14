@@ -106,7 +106,7 @@ Describe Qwen3 (dense) and Qwen3.5 (Gated DeltaNet hybrid, not a bigger Qwen3) o
 
 ### Method: written buffers, one lever at a time, step counts
 
-Write host buffers before timing. Change one lever at a time. Measure pinning against a bound baseline (the fastest pageable placement measured). Compare within one machine, page size, and placement. At least 10 steps per arm, fresh process per arm. Show the unbound-versus-bound pin speedups once (H200, same-job pairs: model-tensor 3.62× vs 2.82×, activation checkpoint 256K 1.24× vs 1.15×, saved-activation 64K 3.85× vs 2.74×, 8×H200 activation checkpoint 1.24× vs 1.10×, 8×H200 saved-activation 5.98× vs 2.56×) as the reason for the bound baseline.
+Write host buffers before timing. Change one lever at a time. Measure pinning against a bound baseline (the fastest pageable placement measured). Compare within one machine, page size, and placement. At least 10 steps per arm, fresh process per arm. Show the unbound-versus-bound pin speedups once (H200, same-job pairs: model-tensor 3.03× vs 2.73×, activation checkpoint 256K 1.24× vs 1.15×, saved-activation 64K 4.76× vs 2.74×, 8×H200 activation checkpoint 1.24× vs 1.10×, 8×H200 saved-activation 5.98× vs 2.53×; bound = DeepSpeed launcher) as the reason for the bound baseline.
 
 ### Single accelerator (Arc Pro B60, H200, Ascend 910B4)
 
@@ -132,7 +132,7 @@ One paragraph on why the shared host makes placement and threads matter, and the
 
 #### Optimizer offload
 
-Why offload at the chosen size (H200: GPU AdamW OOMs on Qwen3-32B, fits Qwen3.5-27B at the HBM edge; Ascend and B60 sized the same way). Per machine, a Qwen3 table and a Qwen3.5 table by launch (DS launcher, numactl + 12 threads, torchrun 12 threads unbound, torchrun default). Lead the interpretation with the lever split (threads 1.51×, pinning 1.70×, threads + binding 1.94×, all 3.10× on Qwen3-32B), then the interaction (pin gain 1.70× → 2.04× → 1.60×), then the GPU-AdamW cost for 27B.
+Why offload at the chosen size (H200: GPU AdamW OOMs on Qwen3-32B, fits Qwen3.5-27B at the HBM edge; Ascend and B60 sized the same way). Per machine, a Qwen3 table and a Qwen3.5 table by launch (DS launcher, numactl + 12 threads, torchrun 12 threads unbound, torchrun default). Lead the interpretation with the lever split (threads 1.51×, pinning 1.70×, threads + binding 1.96×, all 3.08× on Qwen3-32B), then the interaction (pin gain 1.70× → 2.04× → 1.60×), then the GPU-AdamW cost for 27B.
 
 #### Activation checkpoint offload, optimizer on the GPU
 
@@ -202,7 +202,7 @@ Set `OMP_NUM_THREADS` to the cores per rank, or use the DS launcher. torchrun's 
 
 ## Conclusion
 
-Lead with the levers: pinning biggest when copy-bound (H200 single-GPU Qwen3 1.15×–2.82× bound; Qwen3.5 about the same except saved-activation 3.73×; Ascend range from the bound rerun), host levers as large when the CPU computes (8×H200 Qwen3-32B: threads 1.51×, pinning 1.70×, all 3.10×; add the Ascend and B60 multi-device results). Four portable findings, checked on every machine. Close with the gaps: no XPU host registration; saved-activation offload is a benchmark.
+Lead with the levers: pinning biggest when copy-bound (H200 single-GPU Qwen3 1.15×–2.74× under DeepSpeed's launcher; Qwen3.5 about the same except saved-activation 3.79×; Ascend range from the bound rerun), host levers as large when the CPU computes (8×H200 Qwen3-32B: threads 1.51×, pinning 1.70×, all 3.08×; add the Ascend and B60 multi-device results). Four portable findings, checked on every machine. Close with the gaps: no XPU host registration; saved-activation offload is a benchmark.
 
 ## Contributors
 
@@ -218,9 +218,9 @@ Under `media/`. Each workload has a Qwen3 figure and a separate Qwen3.5 figure, 
 
 - `levers.png`: multi-device, Qwen3, speedup from the worst launch for each lever alone and all together, one group per workload, one panel per machine.
 - `summary.png`: single-accelerator pin speedups, Qwen3, one panel per machine.
-- `model_tensor_qwen3.png` / `model_tensor_qwen3_5.png`. H200 bound: Qwen3-8B 2.82×, Qwen3.5-9B 2.77×.
-- `activation_checkpoint_qwen3.png` / `activation_checkpoint_qwen3_5.png`. H200 at 256K, bound: Qwen3-8B 1.15×, Qwen3.5-9B 1.16×.
-- `saved_activation_qwen3.png` / `saved_activation_qwen3_5.png`. H200 at 64K, bound: Qwen3-8B 2.74×, Qwen3.5-9B 3.73×.
+- `model_tensor_qwen3.png` / `model_tensor_qwen3_5.png`. H200, DeepSpeed launcher: Qwen3-8B 2.73×, Qwen3.5-9B 2.78×.
+- `activation_checkpoint_qwen3.png` / `activation_checkpoint_qwen3_5.png`. H200 at 256K, DeepSpeed launcher: Qwen3-8B 1.15×, Qwen3.5-9B 1.15×.
+- `saved_activation_qwen3.png` / `saved_activation_qwen3_5.png`. H200 at 64K, DeepSpeed launcher: Qwen3-8B 2.74×, Qwen3.5-9B 3.79×.
 - Optional `activation_async_vs_blocking.png`: #8282 async versus blocking (both pinned), labeled as a different axis.
 - `h2d_d2h.png`: supporting panels for CUDA (with the parity inset), B60, and Ascend 910B4.
 - `host_footprint.png`, beside How to pin: 5 GiB requested, 8 GiB Torch, 5 GiB native; after free, Torch still 8 GiB, native 0.

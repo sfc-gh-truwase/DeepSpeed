@@ -13,8 +13,8 @@ Blocks publish:
 - Ascend 910B4: every row (Qwen3 and Qwen3.5) will be replaced by a run bound to the NPU's NUMA node.
   The Ascend numbers below are the earlier unbound collection and are placeholders until then.
 - Ascend H2D/D2H will be re-run with host buffers written before timing; the Ascend page-size sentence waits on the same rerun.
-- H200: every printed pinning row is bound, Qwen3.5-9B included (its model-tensor 2.77x is the bound run in job-20261107T043012Z; 2.94x is the unbound run in the same job).
-- H200 Qwen3.5-9B saved-activation 64K, bound (2026-11-07 rerun): 108.53 s pageable, 29.08 s pinned, 3.73×.
+- H200: every printed single-device pinning row is bound by DeepSpeed's launcher (job-20261113T215205Z, all four launches in one job); numactl-bound runs are unpublished references.
+- H200 Qwen3.5-9B saved-activation 64K under DeepSpeed's launcher (job-20261113T215205Z): 109.67 s pageable, 28.96 s pinned, 3.79×.
 - Ascend Qwen3.5-4B saved-activation row is not collected.
 - Ascend 910B4 and Arc Pro B60 single- and multi-device results matching the H200 set will be collected before publishing
   (user, 2026-11-13): single device, pin on/off bound plus one unbound pair per workload; multiple devices on one host,
@@ -75,19 +75,19 @@ The second table isolates pinning on one accelerator of each type, against a pag
 
 | Application | NVIDIA H200, Qwen3-8B | Ascend 910B4, Qwen3-4B | Intel Arc Pro B60 |
 |-------------|-----------------------|------------------------|-------------------|
-| Model-tensor offload | **2.82×** at 4K tokens | **1.85×** at 1K, **1.47×** at 2K | <!-- TODO --> |
+| Model-tensor offload | **2.73×** at 4K tokens | **1.85×** at 1K, **1.47×** at 2K | <!-- TODO --> |
 | Activation checkpoint offload | **1.15×** at 256K | **1.23×** at 8K | <!-- TODO --> |
 | Saved-activation offload | **2.74×** at 64K | **1.14×** at 2K | <!-- TODO --> |
-| Host-to-device copy bandwidth | **5.4×** | **4.0×** | <!-- TODO --> |
+| Host-to-device copy bandwidth | **5.3×** | **4.0×** | <!-- TODO --> |
 
 <!-- TODO: Ascend column from the bound, written-buffer rerun. TODO: B60 column. -->
 
 Speedup is the pageable step time divided by the pinned step time, for the same model, batch, and sequence length on the same machine. Activation rows are at the longest sequence each machine ran, except H200 activation checkpoint, which is at 256K, where offload starts to matter on one GPU. Columns use different models and sequence lengths, so compare within a column, not across.
 
-- **Pinning is the biggest single lever when the step is copy-bound.** On 8×H200 saved-activation offload, pinning alone made the step 5.98× faster than the worst launch, against 2.49× for NUMA binding alone; once memory was pinned, binding added about 5%. Against a bound pageable baseline, pinning sped up every Qwen3 workload we measured, by 1.10× to 2.82×.
-- **When the CPU computes, threads and placement matter as much as pinning.** With the optimizer offloaded on 8×H200, giving CPU Adam its 12 cores per rank made the Qwen3-32B step 1.51× faster, and threads plus binding 1.94×, against 1.70× for pinning alone. All three together: 3.10×.
-- **The levers interact, so measure each against a good setting of the others.** Binding speeds up mostly the pageable arm, so it shrinks the measured pin speedup: without it, the same comparison overstated pinning by up to 2.3× (5.98× unbound against 2.56× bound). More CPU threads shorten the host compute, so copies become a larger share and pinning gains more (1.70× to 2.04× on Qwen3-32B).
-- **Copy bandwidth does not predict step time.** On the H200, a 5.4× faster copy became anywhere from a 1.15× to a 2.82× faster single-GPU Qwen3 step.
+- **Pinning is the biggest single lever when the step is copy-bound.** On 8×H200 saved-activation offload, pinning alone made the step 5.98× faster than the worst launch, against 2.49× for NUMA binding alone; once memory was pinned, binding added about 5%. Against a bound pageable baseline, pinning sped up every Qwen3 workload we measured, by 1.10× to 2.74×.
+- **When the CPU computes, threads and placement matter as much as pinning.** With the optimizer offloaded on 8×H200, giving CPU Adam its 12 cores per rank made the Qwen3-32B step 1.51× faster, and threads plus binding 1.96×, against 1.70× for pinning alone. All three together: 3.08×.
+- **The levers interact, so measure each against a good setting of the others.** Binding speeds up mostly the pageable arm, so it shrinks the measured pin speedup: without it, the same comparison overstated pinning by up to 2.3× (5.98× unbound against 2.53× under DeepSpeed's launcher). More CPU threads shorten the host compute, so copies become a larger share and pinning gains more (1.70× to 2.04× on Qwen3-32B).
+- **Copy bandwidth does not predict step time.** On the H200, a 5.3× faster copy became anywhere from a 1.15× to a 2.74× faster single-GPU Qwen3 step.
 - **Registration, not page-locking, makes host memory fast.** Locked-but-unregistered memory copies at pageable speed. Huge pages and the choice of pinning backend did not change speed once placement was fixed and memory registered.
 - **Offload buys the capacity; the levers buy the speed.** On 8×H200 with the optimizer on the GPU, checkpoint offload ran 2.25× longer sequences than plain checkpointing, and saved-activation offload 2.29× longer than training without checkpointing. Pinning changed neither footprint.
 
@@ -153,22 +153,22 @@ The pinned arm uses DeepSpeed's native backend with device registration on CUDA 
 
 - **Write host buffers before timing.** A never-written buffer maps to the kernel's shared zero page, which inflates pageable bandwidth: 20.8 GB/s instead of 10.1 GB/s host to device on the H200.
 - **Change one lever at a time.** Placement and thread comparisons run every arm in one job, with pinning on and off.
-- **Measure pinning against a bound baseline.** <!-- TODO (launcher rule, user 2026-11-13): rerun these rows under torchrun --numa-binding=node and deepspeed --bind_cores_to_rank --bind_core_list=<node cores>, EXPERIMENTS_HANDOFF.md section 2, item 10; keep numactl only as a reference. --> Every pinned-versus-pageable table without a placement column is launched with `numactl --cpunodebind=<n> --preferred=<n>` on the accelerator's node, which also turns off automatic NUMA balancing for the process. Bound was the fastest pageable placement we measured, so it is the fair baseline.
+- **Measure pinning against a bound baseline.** Every H200 pinned-versus-pageable table without a placement column is launched with DeepSpeed's launcher binding, which binds the process's cores and memory to the accelerator's node (`deepspeed --bind_cores_to_rank`; with one process, `--bind_core_list` names that node's physical cores, here 0-47). Bound was the fastest pageable placement we measured, so it is the fair baseline. Per-process `numactl --cpunodebind=<n> --preferred=<n>` matched it within 1% on every single-device ratio and is kept only as an unpublished reference.
 - **Compare within one machine, one page size, and one placement.**
 
-The bound baseline matters because the pageable arm is the one that placement moves. On the same H200 host, comparing unbound and bound runs from the same job, unbound runs inflated every pin speedup:
+The bound baseline matters because the pageable arm is the one that placement moves. On the same H200 host, comparing launches from the same job, every launch that leaves memory unbound inflated the pin speedup, including torchrun's own binding:
 
-| Application | Unbound | Bound |
-|-------------|---------|-------|
-| Model-tensor, 4K | 3.62× | **2.82×** |
-| Activation checkpoint, 256K | 1.24× | **1.15×** |
-| Saved-activation, 64K | 3.85× | **2.74×** |
-| Activation checkpoint, 8×H200, 256K per GPU | 1.24× | **1.10×** |
-| Saved-activation, 8×H200, 16K per GPU | 5.98× | **2.56×** |
+| Application | Unbound | torchrun `--numa-binding=node` | DeepSpeed launcher |
+|-------------|---------|--------------------------------|--------------------|
+| Model-tensor, Qwen3-8B, 4K | 3.03× | 3.08× | **2.73×** |
+| Activation checkpoint, Qwen3-8B, 256K | 1.24× | 1.32× | **1.15×** |
+| Saved-activation, Qwen3-8B, 64K | 4.76× | 3.75× | **2.74×** |
+| Activation checkpoint, 8×H200, 256K per GPU | 1.24× | 1.23× | **1.10×** |
+| Saved-activation, 8×H200, 16K per GPU | 5.98× | 4.11× | **2.53×** |
 
-<!-- Each row pairs unbound and bound runs from the same job. Model-tensor: job-20261107T043012Z (unbound 14.82 -> 4.09 s; bound 10.53 -> 3.74 s); an earlier job, job-20261024T171244Z, measured 2.90x unbound vs 2.82x bound, which is itself evidence that unbound pageable runs do not reproduce. Activation checkpoint 256K: job-20261111T160827Z (unbound 57.03 -> 46.07 s; bound 51.05 -> 44.52 s). Saved-activation 64K: job-20261107T202125Z. 8xH200: activation checkpoint job-20261112T192249Z (53.46 -> 43.01 s; 47.33 -> 42.97 s), saved-activation job-20261110T223544Z (58.17 -> 9.73 s; 23.71 -> 9.26 s). -->
+<!-- Each row compares launches from one job. Single-device rows: job-20261113T215205Z, one process on GPU0 started through autorun/launch_shim.sh (drops the launcher's rendezvous variables, logs placement): unbound = no launcher; torchrun --standalone --nproc_per_node=1 --numa-binding=node --no-python with OMP_NUM_THREADS=48 (cpus 0-47,96-143, default memory policy); deepspeed --num_gpus=1 --bind_cores_to_rank --bind_core_list=0-47 --no_local_rank --no_python (cpus 0-47, membind 0, OMP_NUM_THREADS=48); numactl --cpunodebind=0 --preferred=0 reference. Pageable -> pinned, unbound / torchrun / DeepSpeed / numactl: model-tensor 11.62 -> 3.83, 11.64 -> 3.78, 10.55 -> 3.86, 10.36 -> 3.75 s (one run each); activation checkpoint 256K 58.03 -> 46.97, 61.35 -> 46.38, 52.07 -> 45.44, 52.04 -> 45.42 s (mean of 2); saved-activation 64K 161.70 -> 33.94, 124.67 -> 33.25, 90.81 -> 33.11, 89.91 -> 33.06 s (mean of 2 run medians). Earlier numactl jobs (job-20261107T043012Z, job-20261111T160827Z, job-20261107T202125Z) gave 2.82x, 1.15x, 2.74x, within 3% of this job's numactl reference. 8xH200: activation checkpoint job-20261112T192249Z (53.46 -> 43.01 s; 47.33 -> 42.97 s), saved-activation job-20261110T223544Z (58.17 -> 9.73 s; 23.71 -> 9.26 s). -->
 
-Across the pairs with both arms recorded, binding moved the pinned step by 0–9% and the pageable step by 10–59%. Unbound runs also failed to reproduce: the same 8K saved-activation command measured 3.08× in one unbound run and 3.60× in another, while bound run-to-run spread was at most 0.37 s.
+Across the single-device rows of both families, DeepSpeed's binding moved the pinned step by 0–8% against unbound and the pageable step by 10–78%. Unbound runs also failed to reproduce: the same 8K saved-activation command measured 3.08× in one unbound run and 3.60× in another, and the two unbound pageable Qwen3.5-9B 256K checkpoint runs in one job took 59.81 s and 74.99 s, while bound run-to-run spread was at most 0.5 s.
 
 ### Single accelerator (Arc Pro B60, H200, Ascend 910B4)
 
@@ -184,12 +184,12 @@ One accelerator per run. The activation workloads offload the optimizer to the C
 
 | Machine | Model, sequence length | Pageable step | Pinned step | Speedup |
 |---------|------------------------|---------------|-------------|---------|
-| H200 | Qwen3-8B, 4096 | 10.53 s | 3.74 s | **2.82×** |
+| H200 | Qwen3-8B, 4096 | 10.55 s | 3.86 s | **2.73×** |
 | Ascend 910B4 | Qwen3-4B, 1024 | 21.26 s | 11.48 s | **1.85×** |
 | Ascend 910B4 | Qwen3-4B, 2048 | 19.32 s | 13.16 s | **1.47×** |
 | Arc Pro B60 | <!-- TODO --> | | | |
 
-<!-- H200: job-20261107T043012Z, bound to GPU0's node (unbound in the same job: 14.82 -> 4.09 s, 3.62x). Ascend: TODO bound rerun; in the unbound data, seq 2048 pageable was faster than seq 1024 pageable — check whether that persists. -->
+<!-- H200: job-20261113T215205Z, deepspeed --bind_cores_to_rank --bind_core_list=0-47 (GPU0's node), one run per arm; same job: unbound 11.62 -> 3.83 s (3.03x), torchrun --numa-binding=node 11.64 -> 3.78 s (3.08x), numactl reference 10.36 -> 3.75 s (2.76x; earlier numactl job-20261107T043012Z 10.53 -> 3.74 s, 2.82x). Ascend: TODO bound rerun; in the unbound data, seq 2048 pageable was faster than seq 1024 pageable — check whether that persists. -->
 
 <!-- FIGURE: media/model_tensor_qwen3_5.png — own chart, never beside Qwen3. -->
 
@@ -197,16 +197,16 @@ One accelerator per run. The activation workloads offload the optimizer to the C
 
 | Machine | Model, sequence length | Pageable step | Pinned step | Speedup |
 |---------|------------------------|---------------|-------------|---------|
-| H200 | Qwen3.5-9B, 4096 | 11.36 s | 4.10 s | **2.77×** |
+| H200 | Qwen3.5-9B, 4096 | 11.57 s | 4.16 s | **2.78×** |
 | Ascend 910B4 | Qwen3.5-4B, 512 | 14.45 s | 10.95 s | **1.32×** |
 | Ascend 910B4 | Qwen3.5-4B, 1024 | 17.95 s | 13.95 s | **1.29×** |
 | Arc Pro B60 | <!-- TODO: Qwen3.5-0.8B or 2B --> | | | |
 
-<!-- H200 Qwen3.5: job-20261107T043012Z, bound to GPU0's node (unbound in the same job: 13.39 -> 4.56 s, 2.94x); fla + causal-conv1d installed. Ascend Qwen3.5: TODO bound rerun. -->
+<!-- H200 Qwen3.5: job-20261113T215205Z, DeepSpeed launcher as above; same job: unbound 13.16 -> 4.49 s (2.93x), torchrun 12.64 -> 4.26 s (2.97x), numactl reference 11.45 -> 4.09 s (2.80x; earlier job-20261107T043012Z 11.36 -> 4.10 s, 2.77x); fla + causal-conv1d installed. Ascend Qwen3.5: TODO bound rerun. -->
 
-With ZeRO-3 CPU offload, every layer's parameters cross the link in every forward and backward pass, whatever the sequence length. On the H200 that transfer dominates the pageable step, and pinning turns a transfer-bound step into one close to compute-bound: about 3× on both architectures, as expected when parameter traffic, not the attention design, sets the step time. The Ascend gains are smaller but still substantial.
+With ZeRO-3 CPU offload, every layer's parameters cross the link in every forward and backward pass, whatever the sequence length. On the H200 that transfer dominates the pageable step, and pinning turns a transfer-bound step into one close to compute-bound: about 2.75× on both architectures, as expected when parameter traffic, not the attention design, sets the step time. The Ascend gains are smaller but still substantial.
 
-Placement mattered less here than the pinning gain. Unbound, the Qwen3-8B pageable step took 14.82 s instead of 10.53 s, and the pinned step 4.09 s instead of 3.74 s. With the CPU threads moved to the far socket, the pinned step did not change (3.77 s against 3.76 s).
+Placement mattered less here than the pinning gain. Unbound, the Qwen3-8B pageable step took 11.62 s instead of 10.55 s under DeepSpeed's launcher, and the pinned step 3.83 s instead of 3.86 s; torchrun's binding, which leaves memory unbound, gave 11.64 s and 3.78 s. With the CPU threads moved to the far socket, the pinned step did not change (3.77 s against 3.76 s).
 
 #### Activation checkpoint offload
 
@@ -220,11 +220,11 @@ The H200 rows are at 256K tokens, where offload starts to matter on one GPU; the
 
 | Machine | Model, sequence length | Pageable step | Pinned step | Speedup |
 |---------|------------------------|---------------|-------------|---------|
-| H200 | Qwen3-8B, 256K | 51.05 s | 44.52 s | **1.15×** |
+| H200 | Qwen3-8B, 256K | 52.07 s | 45.44 s | **1.15×** |
 | Ascend 910B4 | Qwen3-4B, 8K | 15.44 s | 12.60 s | **1.23×** |
 | Arc Pro B60 | <!-- TODO --> | | | |
 
-<!-- H200 256K: job-20261111T160827Z, bound to node 0, mean of 2 runs x 10 timed steps; unbound 57.03 -> 46.07 s (1.24x, 1 run). Packed 4096-token samples, cpu_checkpointing with async copies (ds_async), ZeRO-2 + CPU AdamW, bench_8gpu.py --nproc 1; peak device memory 66.1 GB. Capacity (job-20261111T144343Z): checkpointing alone 136.1 GB at 262,144, out of memory at 294,912. 320K (same job): 62.73 -> 55.03 s, 1.14x bound; 65.30 -> 56.48 s unbound. Superseded copy-cost row, a length where offload is not needed: 64K dense, HF checkpoint hook, 32.60 -> 28.97 s, 1.13x, job-20261107T043012Z, 50.6 GB peak. Ascend: TODO bound rerun. -->
+<!-- H200 256K: job-20261113T215205Z, DeepSpeed launcher (bind_core_list=0-47), mean of 2 runs x 10 timed steps; same job, mean of 2: unbound 58.03 -> 46.97 s (1.24x), torchrun --numa-binding=node 61.35 -> 46.38 s (1.32x), numactl reference 52.04 -> 45.42 s (1.15x; earlier numactl job-20261111T160827Z 51.05 -> 44.52 s). Packed 4096-token samples, cpu_checkpointing with async copies (ds_async), ZeRO-2 + CPU AdamW, bench_8gpu.py --nproc 1; peak device memory 66.1 GB. Capacity (job-20261111T144343Z): checkpointing alone 136.1 GB at 262,144, out of memory at 294,912. 320K (job-20261111T160827Z, numactl-bound reference, not rerun): 62.73 -> 55.03 s, 1.14x; 65.30 -> 56.48 s unbound. Superseded copy-cost row, a length where offload is not needed: 64K dense, HF checkpoint hook, 32.60 -> 28.97 s, 1.13x, job-20261107T043012Z, 50.6 GB peak. Ascend: TODO bound rerun. -->
 
 <!-- FIGURE: media/activation_checkpoint_qwen3_5.png — own chart, never beside Qwen3. -->
 
@@ -232,16 +232,16 @@ The H200 rows are at 256K tokens, where offload starts to matter on one GPU; the
 
 | Machine | Model, sequence length | Pageable step | Pinned step | Speedup |
 |---------|------------------------|---------------|-------------|---------|
-| H200 | Qwen3.5-9B, 256K | 49.54 s | 42.87 s | **1.16×** |
+| H200 | Qwen3.5-9B, 256K | 50.38 s | 43.85 s | **1.15×** |
 | Ascend 910B4 | Qwen3.5-4B, 8K | 92.58 s | 85.85 s | **1.08×** |
 | Arc Pro B60 | <!-- TODO: Qwen3.5-0.8B or 2B --> | | | |
 
-<!-- H200 Qwen3.5 256K: job-20261111T171212Z, bound to node 0, mean of 2 runs x 10 timed steps; unbound 57.47 -> 44.72 s (1.29x, 1 run). Same setup as the Qwen3-8B row; fla kernel active. Checkpointing alone runs out of device memory at 256K; offload peaks at 84.8 GB. Superseded unbound copy-cost row: 64K, 20.81 -> 16.67 s, 1.25x, job-20261016T193445Z, 55.7 GB.
+<!-- H200 Qwen3.5 256K: job-20261113T215205Z, DeepSpeed launcher, mean of 2 runs x 10 timed steps; same job: unbound 67.40 -> 45.58 s (1.48x; pageable runs 59.81 and 74.99 s), torchrun 59.33 -> 45.16 s (1.31x), numactl reference 50.37 -> 43.82 s (1.15x; earlier numactl job-20261111T171212Z 49.54 -> 42.87 s, 1.16x). Same setup as the Qwen3-8B row; fla kernel active. Checkpointing alone runs out of device memory at 256K; offload peaks at 84.8 GB. Superseded unbound copy-cost row: 64K, 20.81 -> 16.67 s, 1.25x, job-20261016T193445Z, 55.7 GB.
 Ascend Qwen3.5-4B is ~6x slower per step than Qwen3-4B at the same length; check that fla + causal-conv1d kernels were active (the same missing-package fallback made H200 Qwen3.5 ~8x slower before job-20261016T193445Z). TODO bound rerun. -->
 
-Copies stay asynchronous in both arms; pinning applies to the activation pool and to the CPU optimizer's host buffers together. The H200 rows use DeepSpeed's `cpu_checkpointing` on packed 4096-token samples, with the optimizer offloaded to the CPU. 256K is where offload starts to matter on one GPU: plain checkpointing runs out of device memory there on Qwen3.5-9B, and fits Qwen3-8B with only 3.7 GB to spare (136.1 of 139.8 GB) before running out at 288K. With offload, the same steps peak at 66.1 GB and 84.8 GB. The pinning gain is modest because checkpoint offload copies only one tensor per layer, so copies are a small part of the step: pinning saved 6.5 s (Qwen3-8B) and 6.7 s (Qwen3.5-9B) per step. At 320K, where checkpointing alone no longer fits Qwen3-8B, the bound gain was 1.14× (62.73 s against 55.03 s).
+Copies stay asynchronous in both arms; pinning applies to the activation pool and to the CPU optimizer's host buffers together. The H200 rows use DeepSpeed's `cpu_checkpointing` on packed 4096-token samples, with the optimizer offloaded to the CPU. 256K is where offload starts to matter on one GPU: plain checkpointing runs out of device memory there on Qwen3.5-9B, and fits Qwen3-8B with only 3.7 GB to spare (136.1 of 139.8 GB) before running out at 288K. With offload, the same steps peak at 66.1 GB and 84.8 GB. The pinning gain is modest because checkpoint offload copies only one tensor per layer, so copies are a small part of the step: pinning saved 6.6 s (Qwen3-8B) and 6.5 s (Qwen3.5-9B) per step. At 320K, where checkpointing alone no longer fits Qwen3-8B, an earlier `numactl`-bound run gained 1.14× (62.73 s against 55.03 s).
 
-Unbound, the 256K pageable steps took 57.03 s and 57.47 s instead of 51.05 s and 49.54 s, while the pinned steps moved by under 2 s, so the pin gains read 1.24× and 1.29×.
+Without a memory binding, the 256K pageable steps took 58.03 s and 67.40 s unbound and 61.35 s and 59.33 s under torchrun's binding, against 52.07 s and 50.38 s under DeepSpeed's launcher, while the pinned steps moved by under 2 s. The pin gains therefore read 1.24× and 1.48× unbound, and 1.32× and 1.31× under torchrun.
 
 This comparison is different from the asynchronous-versus-blocking one in [#8282](https://github.com/deepspeedai/DeepSpeed/pull/8282), where both arms are pinned. That measures the value of overlap; this section measures the value of pinning.
 
@@ -257,11 +257,11 @@ Each row is the longest sequence we ran on that machine.
 
 | Machine | Model, sequence length | Pageable step | Pinned step | Speedup |
 |---------|------------------------|---------------|-------------|---------|
-| H200 | Qwen3-8B, 64K | 91.22 s | 33.25 s | **2.74×** |
+| H200 | Qwen3-8B, 64K | 90.81 s | 33.11 s | **2.74×** |
 | Ascend 910B4 | Qwen3-4B, 2K | 9.48 s | 8.34 s | **1.14×** |
 | Arc Pro B60 | <!-- TODO: Qwen3-0.6B or 1.7B, 2K --> | | | |
 
-<!-- H200 64K: job-20261107T202125Z, bound to GPU0's node, mean of 2 run medians (91.62 / 90.81 -> 33.24 / 33.26 s); unbound in the same job 3.85x. Peak device memory 96.2 GB allocated / 125.1 GB reserved (same job). Shorter H200 rows (not printed, bound, same job): 8K/16K/32K 2.98x/3.26x/3.17x. Ascend: TODO bound rerun. -->
+<!-- H200 64K: job-20261113T215205Z, DeepSpeed launcher, mean of 2 run medians (90.56 / 91.06 -> 33.10 / 33.11 s; driver order pageable, pinned, pinned, pageable); same job: unbound 161.70 -> 33.94 s (4.76x), torchrun 124.67 -> 33.25 s (3.75x), numactl reference 89.91 -> 33.06 s (2.72x; earlier numactl job-20261107T202125Z 91.22 -> 33.25 s, 2.74x). Peak device memory 96.2 GB allocated / 125.1 GB reserved (job-20261107T202125Z). Shorter H200 rows (not printed, numactl-bound, job-20261107T202125Z): 8K/16K/32K 2.98x/3.26x/3.17x. Ascend: TODO bound rerun. -->
 
 <!-- FIGURE: media/saved_activation_qwen3_5.png — own chart, never beside Qwen3. -->
 
@@ -269,19 +269,19 @@ Each row is the longest sequence we ran on that machine.
 
 | Machine | Model, sequence length | Pageable step | Pinned step | Speedup |
 |---------|------------------------|---------------|-------------|---------|
-| H200 | Qwen3.5-9B, 64K | 108.53 s | 29.08 s | **3.73×** |
+| H200 | Qwen3.5-9B, 64K | 109.67 s | 28.96 s | **3.79×** |
 | Ascend 910B4 | <!-- TODO: Qwen3.5-4B, 2K --> | | | |
 | Arc Pro B60 | <!-- TODO: Qwen3.5-0.8B or 2B --> | | | |
 
-<!-- H200 Qwen3.5: rerun job-20261107T202125Z, bound and unbound (unbound 64K: 162.43 -> 30.04 s, 5.41x). Peak device memory not re-extracted from the rerun. -->
+<!-- H200 Qwen3.5: job-20261113T215205Z, DeepSpeed launcher (109.81 / 109.53 -> 28.96 / 28.96 s); same job: unbound 174.14 -> 29.55 s (5.89x), torchrun 172.54 -> 29.06 s (5.94x), numactl reference 109.90 -> 28.93 s (3.80x; earlier numactl job-20261107T202125Z 108.53 -> 29.08 s, 3.73x). Peak device memory not re-extracted from the rerun. -->
 
-At most one layer's saved tensors stay on the device during the forward pass, and two layers are prefetched for the backward pass. On the H200, saved-activation offload gains the most from pinning of the single-GPU workloads because it copies the most: every saved tensor in every layer, both ways, so its copy volume grows as fast as the activations themselves. On Qwen3.5 the gain at 64K is 3.73×. One plausible reason is that its linear-attention layers add compute only linearly with length, so copies remain most of the step. On the Ascend, at a 2K sequence, the Qwen3 gain was only 1.14×.
+At most one layer's saved tensors stay on the device during the forward pass, and two layers are prefetched for the backward pass. On the H200, saved-activation offload gains the most from pinning of the single-GPU workloads because it copies the most: every saved tensor in every layer, both ways, so its copy volume grows as fast as the activations themselves. On Qwen3.5 the gain at 64K is 3.79×. One plausible reason is that its linear-attention layers add compute only linearly with length, so copies remain most of the step. On the Ascend, at a 2K sequence, the Qwen3 gain was only 1.14×.
 
-Placement moved this workload the most. Unbound, the 64K pin gains read 3.85× (Qwen3-8B) and 5.41× (Qwen3.5-9B). For Qwen3.5-9B, the unbound pageable step took 162.43 s against 108.53 s bound, while the pinned step took 30.04 s against 29.08 s.
+Placement moved this workload the most. Unbound, the 64K pin gains read 4.76× (Qwen3-8B) and 5.89× (Qwen3.5-9B), and under torchrun's binding 3.75× and 5.94×. For Qwen3.5-9B, the unbound pageable step took 174.14 s against 109.67 s under DeepSpeed's launcher, while the pinned step took 29.55 s against 28.96 s.
 
-Pinning is what makes skipping recomputation competitive at all. At 64K on the H200 (bound, separate jobs), a pageable Qwen3-8B saved-activation step took 91.22 s, against 32.60 s for pageable checkpoint offload. Pinned, the gap narrows to 33.25 s against 28.97 s. Checkpoint offload remained faster and used far less device memory (50.6 GB against 125.1 GB reserved). Qwen3.5-9B shows the same ordering (29.08 s against 16.67 s pinned; the checkpoint figure is from an unbound run, and binding barely moves a pinned step). On this machine recomputation is still the better trade; saved-activation offload is the technique whose viability depends most on pinning. At 98K tokens it runs out of device memory on the H200.
+Pinning is what makes skipping recomputation competitive at all. At 64K on the H200 (bound, separate jobs; the checkpoint figures are from an earlier `numactl`-bound run), a pageable Qwen3-8B saved-activation step took 90.81 s, against 32.60 s for pageable checkpoint offload. Pinned, the gap narrows to 33.11 s against 28.97 s. Checkpoint offload remained faster and used far less device memory (50.6 GB against 125.1 GB reserved). Qwen3.5-9B shows the same ordering (28.96 s against 16.67 s pinned; the checkpoint figure is from an unbound run, and binding barely moves a pinned step). On this machine recomputation is still the better trade; saved-activation offload is the technique whose viability depends most on pinning. At 98K tokens it runs out of device memory on the H200.
 
-<!-- 64K comparison: saved-activation job-20261107T202125Z; checkpoint offload (HF hook, ZeRO-2 CPU AdamW, --act-mem-opt) job-20261107T043012Z, bound, 32.60 -> 28.97 s, 50.6 GB peak. Qwen3.5 checkpoint 64K: job-20261016T193445Z, unbound, 20.81 -> 16.67 s. -->
+<!-- 64K comparison: saved-activation job-20261113T215205Z; checkpoint offload (HF hook, ZeRO-2 CPU AdamW, --act-mem-opt) job-20261107T043012Z, bound, 32.60 -> 28.97 s, 50.6 GB peak. Qwen3.5 checkpoint 64K: job-20261016T193445Z, unbound, 20.81 -> 16.67 s. -->
 
 #### Supporting H2D/D2H microbench
 
@@ -289,16 +289,16 @@ Pinning is what makes skipping recomputation competitive at all. At 64K on the H
 
 | Machine | Direction | Pageable | Pinned | Ratio |
 |---------|-----------|----------|--------|-------|
-| H200 | Host to device | 10.2 GB/s | 55.4 GB/s | **5.4×** |
-| H200 | Device to host | 17.3 GB/s | 54.9 GB/s | **3.2×** |
+| H200 | Host to device | 10.4 GB/s | 55.4 GB/s | **5.3×** |
+| H200 | Device to host | 17.6 GB/s | 55.0 GB/s | **3.1×** |
 | Ascend 910B4 | Host to device | 6.48 GB/s | 25.97 GB/s | **4.0×** |
 | Ascend 910B4 | Device to host | 6.71 GB/s | 26.49 GB/s | **3.9×** |
 | Arc Pro B60 | Host to device | <!-- TODO --> | <!-- TODO --> | |
 | Arc Pro B60 | Device to host | <!-- TODO --> | <!-- TODO --> | |
 
-<!-- 256 MiB transfers. H200: job-20261024T171244Z, bound, median of 3. Ascend: native-registered vs pageable; TODO bound, written-buffer rerun. B60: Torch/XPU pin vs pageable. -->
+<!-- 256 MiB transfers. H200: job-20261113T215205Z, DeepSpeed launcher (bind_core_list=0-47), median of 3: 10.36 -> 55.40 / 17.59 -> 54.95 GB/s; same job: unbound 10.19 -> 55.39 / 16.08 -> 54.91, torchrun --numa-binding=node 10.22 -> 55.40 / 17.03 -> 54.94, numactl reference 9.98 -> 55.40 / 17.03 -> 54.93 (earlier numactl job-20261024T171244Z 10.23 -> 55.40 / 17.31 -> 54.94). Ascend: native-registered vs pageable; TODO bound, written-buffer rerun. B60: Torch/XPU pin vs pageable. -->
 
-These numbers explain the step-time results but do not predict them: the H200's 5.4× copy speedup became a 1.15× to 2.82× faster Qwen3 step, depending on how much of the step was copying. Each machine's ratio also stands alone, because the link, the driver, and the pageable path differ.
+These numbers explain the step-time results but do not predict them: the H200's 5.3× copy speedup became a 1.15× to 2.74× faster Qwen3 step, depending on how much of the step was copying. Each machine's ratio also stands alone, because the link, the driver, and the pageable path differ.
 
 Placement reaches pinned copies on some machines. On the Ascend, a buffer on the remote NUMA node cost pinned device-to-host copies about 26%, against at most 6% on the H200 with one GPU copying. With all eight H200 GPUs copying, unbound pinned device-to-host copies were 19% slower than under either launcher's binding (see the multi-device microbench).
 
@@ -375,8 +375,8 @@ At 262,144 tokens per GPU (256K), where checkpointing alone does not fit, pinnin
 
 | Model, 256K tokens per GPU | Placement | Pageable step | Pinned step | Speedup |
 |----------------------------|-----------|---------------|-------------|---------|
-| Qwen3-8B | bound, `numactl` per rank | 47.33 s | 42.97 s | **1.10×** |
-| Qwen3-8B | bound, `deepspeed --bind_cores_to_rank` | 47.24 s | 42.97 s | 1.10× |
+| Qwen3-8B | bound, `numactl` per rank (reference) | 47.33 s | 42.97 s | 1.10× |
+| Qwen3-8B | bound, `deepspeed --bind_cores_to_rank` | 47.24 s | 42.97 s | **1.10×** |
 | Qwen3-8B | torchrun `--numa-binding=node` | 52.77 s | 43.04 s | 1.23× |
 | Qwen3-8B | unbound | 53.46 s | 43.01 s | 1.24× |
 
@@ -384,8 +384,8 @@ At 262,144 tokens per GPU (256K), where checkpointing alone does not fit, pinnin
 
 | Model, 256K tokens per GPU | Placement | Pageable step | Pinned step | Speedup |
 |----------------------------|-----------|---------------|-------------|---------|
-| Qwen3.5-9B | bound, `numactl` per rank | 44.90 s | 41.04 s | **1.09×** |
-| Qwen3.5-9B | bound, `deepspeed --bind_cores_to_rank` | 44.85 s | 41.04 s | 1.09× |
+| Qwen3.5-9B | bound, `numactl` per rank (reference) | 44.90 s | 41.04 s | 1.09× |
+| Qwen3.5-9B | bound, `deepspeed --bind_cores_to_rank` | 44.85 s | 41.04 s | **1.09×** |
 | Qwen3.5-9B | torchrun `--numa-binding=node` | 49.00 s | 41.09 s | 1.19× |
 | Qwen3.5-9B | unbound | 50.07 s | 41.15 s | 1.22× |
 
@@ -416,8 +416,8 @@ At 16K tokens per GPU, inside both windows, placement matters more here than for
 
 | Model, 16K tokens per GPU | Placement | Pageable step | Pinned step | Speedup |
 |---------------------------|-----------|---------------|-------------|---------|
-| Qwen3-8B | bound, `numactl` per rank | 23.71 s | 9.26 s | **2.56×** |
-| Qwen3-8B | bound, `deepspeed --bind_cores_to_rank` | 23.36 s | 9.25 s | 2.53× |
+| Qwen3-8B | bound, `numactl` per rank (reference) | 23.71 s | 9.26 s | 2.56× |
+| Qwen3-8B | bound, `deepspeed --bind_cores_to_rank` | 23.36 s | 9.25 s | **2.53×** |
 | Qwen3-8B | torchrun `--numa-binding=node` | 38.05 s | 9.27 s | 4.11× |
 | Qwen3-8B | unbound | 58.17 s | 9.73 s | 5.98× |
 
@@ -425,8 +425,8 @@ At 16K tokens per GPU, inside both windows, placement matters more here than for
 
 | Model, 16K tokens per GPU | Placement | Pageable step | Pinned step | Speedup |
 |---------------------------|-----------|---------------|-------------|---------|
-| Qwen3.5-9B | bound, `numactl` per rank | 29.01 s | 11.37 s | **2.55×** |
-| Qwen3.5-9B | bound, `deepspeed --bind_cores_to_rank` | 29.00 s | 11.30 s | 2.57× |
+| Qwen3.5-9B | bound, `numactl` per rank (reference) | 29.01 s | 11.37 s | 2.55× |
+| Qwen3.5-9B | bound, `deepspeed --bind_cores_to_rank` | 29.00 s | 11.30 s | **2.57×** |
 | Qwen3.5-9B | torchrun `--numa-binding=node` | 59.00 s | 11.33 s | 5.21× |
 | Qwen3.5-9B | unbound | 80.72 s | 13.94 s | 5.79× |
 
@@ -580,7 +580,7 @@ With optimizer offload, set `OMP_NUM_THREADS` to the cores each rank owns, or la
 
 ## Conclusion
 
-CPU offload buys capacity with host memory; pinning, placement, and threads decide how much speed that capacity costs. Pinning is the biggest single lever when the step is copy-bound. On one H200 with Qwen3-8B, against a bound pageable baseline, it made offloaded steps **1.15× to 2.82× faster**: 2.82× for model-tensor offload, 2.74× for saved-activation offload at 64K tokens, and 1.15× for activation checkpoint offload at 256K. Qwen3.5-9B gained about the same, except for saved-activation offload, where it gained 3.73×. On an Ascend 910B4, with smaller models and shorter sequences, pinning helped every workload too, by **1.08× to 1.85×**<!-- TODO: update from bound Ascend rerun; add B60 -->. When the CPU computes, the host levers matter as much: on 8×H200 with the optimizer offloaded, CPU threads alone sped up the Qwen3-32B step 1.51×, pinning alone 1.70×, and all three levers together 3.10×.
+CPU offload buys capacity with host memory; pinning, placement, and threads decide how much speed that capacity costs. Pinning is the biggest single lever when the step is copy-bound. On one H200 with Qwen3-8B, against a bound pageable baseline, it made offloaded steps **1.15× to 2.74× faster**: 2.74× for saved-activation offload at 64K tokens, 2.73× for model-tensor offload, and 1.15× for activation checkpoint offload at 256K. Qwen3.5-9B gained about the same, except for saved-activation offload, where it gained 3.79×. On an Ascend 910B4, with smaller models and shorter sequences, pinning helped every workload too, by **1.08× to 1.85×**<!-- TODO: update from bound Ascend rerun; add B60 -->. When the CPU computes, the host levers matter as much: on 8×H200 with the optimizer offloaded, CPU threads alone sped up the Qwen3-32B step 1.51×, pinning alone 1.70×, and all three levers together 3.08×.
 
 Four findings should hold beyond these machines:
 

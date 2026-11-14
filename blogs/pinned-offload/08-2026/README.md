@@ -6,8 +6,8 @@ Blocks publish:
 - Intel Arc Pro B60: every result (single and multi-device) is not collected.
 - Ascend 910B4: bound reruns of the single-device rows and the copy bandwidth (current numbers are unbound
   placeholders), the Qwen3.5-4B saved-activation row, and the multi-device results, including all-NPU copy bandwidth.
-- Single-device rows (H200, Ascend, B60) and one-device copies rerun under launcher binding instead of numactl
-  (EXPERIMENTS_HANDOFF.md section 2, item 10).
+- Ascend and B60 single-device rows and one-device copies under launcher binding instead of numactl
+  (EXPERIMENTS_HANDOFF.md section 2, item 10; H200 collected).
 - Figures (media/) and the contributor list.
 - Link to the arXiv version once it is posted.
 -->
@@ -39,7 +39,7 @@ We evaluated four workloads. The first measures the copies themselves; the other
 
 On a single device, the two activation workloads also offload the optimizer, and pinning covers its host buffers too. The multi-device activation runs keep the optimizer on the accelerator.
 
-We ran them on three accelerator types: NVIDIA H200, Huawei Ascend 910B4, and Intel Arc Pro B60, each within a single host (multi-node runs were not tested). Each training workload uses two Hugging Face model families in separate tables: Qwen3 (dense) and Qwen3.5 (hybrid linear and full attention), randomly initialized, in bf16, at batch size 1. Model size and sequence length differ by machine, so compare results within a column, not across columns. The full report lists hardware and software versions. Every run is bound to the accelerator's NUMA node using only a launcher's own binding, never an external tool. <!-- TODO: single-device rows and the one-device copy cells are still from numactl-bound runs; replace with the launcher-bound rerun (EXPERIMENTS_HANDOFF.md section 2, item 10). -->
+We ran them on three accelerator types: NVIDIA H200, Huawei Ascend 910B4, and Intel Arc Pro B60, each within a single host (multi-node runs were not tested). Each training workload uses two Hugging Face model families in separate tables: Qwen3 (dense) and Qwen3.5 (hybrid linear and full attention), randomly initialized, in bf16, at batch size 1. Model size and sequence length differ by machine, so compare results within a column, not across columns. The full report lists hardware and software versions. Every run is bound to the accelerator's NUMA node using only a launcher's own binding, never an external tool.
 
 ### Single device: pinning
 
@@ -49,7 +49,7 @@ We ran them on three accelerator types: NVIDIA H200, Huawei Ascend 910B4, and In
 
 | Workload | H200, Qwen3-8B | Ascend 910B4, Qwen3-4B | Arc Pro B60 |
 |----------|----------------|------------------------|-------------|
-| Model-tensor offload | **2.82×** (4K tokens) | **1.85×** (1K), **1.47×** (2K) | *pending* |
+| Model-tensor offload | **2.73×** (4K tokens) | **1.85×** (1K), **1.47×** (2K) | *pending* |
 | Activation checkpoint offload | **1.15×** (256K) | **1.23×** (8K) | *pending* |
 | Saved-activation offload | **2.74×** (64K) | **1.14×** (2K) | *pending* |
 
@@ -57,13 +57,13 @@ We ran them on three accelerator types: NVIDIA H200, Huawei Ascend 910B4, and In
 
 | Workload | H200, Qwen3.5-9B | Ascend 910B4, Qwen3.5-4B | Arc Pro B60 |
 |----------|------------------|--------------------------|-------------|
-| Model-tensor offload | **2.77×** (4K tokens) | **1.32×** (512), **1.29×** (1K) | *pending* |
-| Activation checkpoint offload | **1.16×** (256K) | **1.08×** (8K) | *pending* |
-| Saved-activation offload | **3.73×** (64K) | *pending* | *pending* |
+| Model-tensor offload | **2.78×** (4K tokens) | **1.32×** (512), **1.29×** (1K) | *pending* |
+| Activation checkpoint offload | **1.15×** (256K) | **1.08×** (8K) | *pending* |
+| Saved-activation offload | **3.79×** (64K) | *pending* | *pending* |
 
 <!-- TODO: Ascend columns from the bound rerun; B60 columns. -->
 
-Speedup is the pageable step time divided by the pinned step time, with both runs bound to the accelerator's NUMA node, the fairest pageable baseline we found. Pinning helped every workload on every machine we measured. The gain tracks how much of the step is copying: on the H200, model-tensor and saved-activation offload move the most data and gain the most, while checkpoint offload copies one tensor per layer and gains least. Qwen3.5 saved-activation offload gains most of all, plausibly because its linear-attention layers add little compute per token, so copies stay most of the step.
+Speedup is the pageable step time divided by the pinned step time, with both runs under DeepSpeed's launcher binding (the process's cores and memory on the accelerator's NUMA node), the fairest pageable baseline we found. torchrun's binding covers CPUs only, so it left H200 pageable steps up to 1.6× slower and its pin ratios larger (1.31× to 5.94×), overstating what pinning adds to a well-placed job. Pinning helped every workload on every machine we measured. The gain tracks how much of the step is copying: on the H200, model-tensor and saved-activation offload move the most data and gain the most, while checkpoint offload copies one tensor per layer and gains least. Qwen3.5 saved-activation offload gains most of all, plausibly because its linear-attention layers add little compute per token, so copies stay most of the step.
 
 ### Multiple devices: pinning, NUMA placement, and CPU threads
 
@@ -103,23 +103,23 @@ The step-time gains come from faster copies. The table gives the pinned speedup 
 
 | Machine | Direction | One device copying | All devices copying |
 |---------|-----------|--------------------|---------------------|
-| H200 | Host to device | **5.4×** | **3.3×** |
-| H200 | Device to host | **3.2×** | **1.7×** |
+| H200 | Host to device | **5.3×** | **3.3×** |
+| H200 | Device to host | **3.1×** | **1.7×** |
 | Ascend 910B4 | Host to device | **4.0×** | *pending* |
 | Ascend 910B4 | Device to host | **3.9×** | *pending* |
 | Arc Pro B60 | Host to device | *pending* | *pending* |
 | Arc Pro B60 | Device to host | *pending* | *pending* |
 
-<!-- Sources: ARXIV_DRAFT.md single-device and all-GPUs-copying microbench tables. H200 one device: 10.2 -> 55.4 and 17.3 -> 54.9 GB/s; all eight under deepspeed --bind_cores_to_rank, per GPU: 8.57 -> 27.91 and 15.00 -> 26.18 GB/s (job-20261113T151443Z; torchrun --numa-binding=node 8.62 -> 28.00 and 15.03 -> 26.30; torchrun unbound pinned D2H 21.22 GB/s, 19% below DeepSpeed's launcher). Ascend: 6.48 -> 25.97 and 6.71 -> 26.49 GB/s (unbound placeholder). -->
+<!-- Sources: ARXIV_DRAFT.md single-device and all-GPUs-copying microbench tables. H200 one device under deepspeed --bind_cores_to_rank --bind_core_list=0-47: 10.36 -> 55.40 and 17.59 -> 54.95 GB/s (job-20261113T215205Z, median of 3); all eight under deepspeed --bind_cores_to_rank, per GPU: 8.57 -> 27.91 and 15.00 -> 26.18 GB/s (job-20261113T151443Z; torchrun --numa-binding=node 8.62 -> 28.00 and 15.03 -> 26.30; torchrun unbound pinned D2H 21.22 GB/s, 19% below DeepSpeed's launcher). Ascend: 6.48 -> 25.97 and 6.71 -> 26.49 GB/s (unbound placeholder). -->
 
-Copy speedups are larger than step speedups because only part of a step is copying: on one H200, a 5.4× faster host-to-device copy became a 1.15× to 3.73× faster training step. With all eight H200 GPUs copying, pinned bandwidth per GPU halves while pageable bandwidth barely moves, so the speedup shrinks. On our server, GPUs share a PCIe switch uplink in pairs, and pageable copies are limited by CPU staging rather than the link. Pinned copies in eight-GPU training ran at the same ceiling as this benchmark. Placement also starts to reach pinned copies: unbound, pinned device-to-host copies were 19% slower than under either launcher's binding.
+Copy speedups are larger than step speedups because only part of a step is copying: on one H200, a 5.3× faster host-to-device copy became a 1.15× to 3.79× faster training step. With all eight H200 GPUs copying, pinned bandwidth per GPU halves while pageable bandwidth barely moves, so the speedup shrinks. On our server, GPUs share a PCIe switch uplink in pairs, and pageable copies are limited by CPU staging rather than the link. Pinned copies in eight-GPU training ran at the same ceiling as this benchmark. Placement also starts to reach pinned copies: unbound, pinned device-to-host copies were 19% slower than under either launcher's binding.
 
 ### What the results show
 
 - **Pinning is the biggest single lever when the step is copy-bound.** From torchrun's defaults, it alone made 8-GPU saved-activation offload 5.98× faster, against 2.49× for NUMA binding alone. Against a bound pageable run it was still 2.53×.
 - **When the CPU computes, threads matter as much as pinning.** With the optimizer offloaded, CPU Adam is host compute that pinning cannot speed up. Giving it 12 threads per rank was worth 1.51×, close to pinning's 1.70×, and all three settings together gave 3.08×.
 - **Pinning makes placement matter less, not zero.** On the H200, binding moved the pageable step by up to 2.8× and the pinned step by about 5% or less, except on Qwen3.5: 23% for saved-activation offload and 11% for optimizer offload. An unbound comparison can overstate the benefit of pinning by up to 2.4×. On the Ascend, a remote NUMA node still slowed pinned device-to-host copies by about 26%.
-- **Shared links cap multi-device copies.** On our 8×H200 server, pinned copy bandwidth per GPU halved when all eight GPUs copied, while pageable bandwidth barely moved, so the per-GPU pin advantage shrank from 5.4× to 3.3× host to device.
+- **Shared links cap multi-device copies.** On our 8×H200 server, pinned copy bandwidth per GPU halved when all eight GPUs copied, while pageable bandwidth barely moved, so the per-GPU pin advantage shrank from 5.3× to 3.3× host to device.
 - **Registration, not page-locking, makes host memory fast.** On the H200, memory that was locked but not registered with the device driver copied at pageable speed.
 - **Some settings did not help.** On the H200, huge pages and the choice of pinning backend changed step time by at most 4% once placement was fixed and memory registered.
 
@@ -163,7 +163,7 @@ DeepSpeed's binding assumes accelerators are numbered in NUMA order; on hosts wh
 
 ## Conclusion
 
-CPU offload buys capacity with host memory, and three host-side settings decide how much speed that capacity costs. Pinning is the biggest single lever when the step is dominated by copies, giving up to 3.73× on one H200 and 2.57× on eight, both against a bound pageable baseline. When the CPU computes, as with an offloaded optimizer, CPU threads matter as much, and the three settings together made an 8-GPU optimizer-offload step 3.08× faster than torchrun's defaults. The defaults to change are the launcher's, not DeepSpeed's: keep pinning on, bind each rank with a memory policy, and give the CPU optimizer its cores.
+CPU offload buys capacity with host memory, and three host-side settings decide how much speed that capacity costs. Pinning is the biggest single lever when the step is dominated by copies, giving up to 3.79× on one H200 and 2.57× on eight, both against a bound pageable baseline. When the CPU computes, as with an offloaded optimizer, CPU threads matter as much, and the three settings together made an 8-GPU optimizer-offload step 3.08× faster than torchrun's defaults. The defaults to change are the launcher's, not DeepSpeed's: keep pinning on, bind each rank with a memory policy, and give the CPU optimizer its cores.
 
 The benchmarks are in [DeepSpeedExamples `benchmarks/pin_memory`](https://github.com/sfc-gh-truwase/DeepSpeedExamples/tree/tjruwase/pin-memory-experiments/benchmarks/pin_memory), and the [full technical report](ARXIV_DRAFT.md) has the details. <!-- TODO: switch to deepspeedai/DeepSpeedExamples master and the arXiv link. -->
 
