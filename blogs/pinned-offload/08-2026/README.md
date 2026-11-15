@@ -1,6 +1,7 @@
 <!--
-EDITOR NOTES (not rendered). Short blog, 2026-11-13. The long version with methodology, per-row step times, job IDs, and
-reproduction commands is ARXIV_DRAFT.md; every number here comes from it. Headings follow the blog layout in LAYOUT.md.
+EDITOR NOTES (not rendered). Short blog, 2026-11-13. There is no long report (dropped 2026-11-14): the how (flags per framework,
+setup, method, reproduction commands) lives in the DeepSpeedExamples benchmarks/pin_memory README. Per-row step times
+and job IDs are in the hidden source comments below and in ARXIV_DRAFT.md as of commit 3d2fd3b (git history). Headings follow the blog layout in LAYOUT.md.
 
 Blocks publish:
 - Intel Arc Pro B60: every result (single and multi-device) is not collected.
@@ -9,7 +10,7 @@ Blocks publish:
 - Ascend and B60 single-device rows and one-device copies under launcher binding instead of numactl
   (EXPERIMENTS_HANDOFF.md section 2, item 10; H200 collected).
 - Figures (media/) and the contributor list.
-- Link to the arXiv version once it is posted.
+- Switch the DeepSpeedExamples links to deepspeedai/DeepSpeedExamples master once the branch merges.
 -->
 
 # Efficient CPU Offload: Pinned Memory, NUMA Placement, and CPU Threads
@@ -24,7 +25,7 @@ This blog shows:
 2. How PyTorch-ecosystem frameworks support pinning, NUMA placement, and CPU threads.
 3. Best practices.
 
-The [full technical report](ARXIV_DRAFT.md) has the methodology, every measurement, and the commands to reproduce them. <!-- TODO: link the arXiv version once posted. -->
+The [benchmark README](https://github.com/sfc-gh-truwase/DeepSpeedExamples/tree/tjruwase/pin-memory-experiments/benchmarks/pin_memory) in DeepSpeedExamples has the setup, the method, the settings for each framework, and the commands to reproduce every result.
 
 ## Performance impact of tuning
 
@@ -39,7 +40,7 @@ We evaluated four workloads. The first measures the copies themselves; the other
 
 On a single device, the two activation workloads also offload the optimizer, and pinning covers its host buffers too. The multi-device activation runs keep the optimizer on the accelerator.
 
-We ran them on three accelerator types: NVIDIA H200, Huawei Ascend 910B4, and Intel Arc Pro B60, each within a single host (multi-node runs were not tested). Each training workload uses two Hugging Face model families in separate tables: Qwen3 (dense) and Qwen3.5 (hybrid linear and full attention), randomly initialized, in bf16, at batch size 1. Model size and sequence length differ by machine, so compare results within a column, not across columns. The full report lists hardware and software versions. Where a speedup comes from a bound run, the binding is a launcher's own, never an external tool; the full report notes the few supporting results that were bound with numactl instead.
+We ran them on three accelerator types: NVIDIA H200, Huawei Ascend 910B4, and Intel Arc Pro B60, each within a single host (multi-node runs were not tested). Each training workload uses two Hugging Face model families in separate tables: Qwen3 (dense) and Qwen3.5 (hybrid linear and full attention), randomly initialized, in bf16, at batch size 1. Model size and sequence length differ by machine, so compare results within a column, not across columns. The benchmark README lists hardware and software versions. Where a speedup comes from a bound run, the binding is a launcher's own, never an external tool; the benchmark README notes the few supporting results that were bound with numactl instead.
 
 ### Single device: pinning
 
@@ -110,7 +111,7 @@ The step-time gains come from faster copies. The table gives the pinned speedup 
 | Arc Pro B60 | Host to device | *pending* | *pending* |
 | Arc Pro B60 | Device to host | *pending* | *pending* |
 
-<!-- Sources: ARXIV_DRAFT.md single-device and all-GPUs-copying microbench tables. H200 one device under deepspeed --bind_cores_to_rank --bind_core_list=0-47: 10.36 -> 55.40 and 17.59 -> 54.95 GB/s (job-20261113T215205Z, median of 3); all eight under deepspeed --bind_cores_to_rank, per GPU: 8.57 -> 27.91 and 15.00 -> 26.18 GB/s (job-20261113T151443Z; torchrun --numa-binding=node 8.62 -> 28.00 and 15.03 -> 26.30; torchrun unbound pinned D2H 21.22 GB/s, 19% below DeepSpeed's launcher). Ascend one device, hidden as pending: 6.48 -> 25.97 and 6.71 -> 26.49 GB/s (4.0x / 3.9x, unbound placeholder). -->
+<!-- Sources: ARXIV_DRAFT.md at 3d2fd3b single-device and all-GPUs-copying microbench tables. H200 one device under deepspeed --bind_cores_to_rank --bind_core_list=0-47: 10.36 -> 55.40 and 17.59 -> 54.95 GB/s (job-20261113T215205Z, median of 3); all eight under deepspeed --bind_cores_to_rank, per GPU: 8.57 -> 27.91 and 15.00 -> 26.18 GB/s (job-20261113T151443Z; torchrun --numa-binding=node 8.62 -> 28.00 and 15.03 -> 26.30; torchrun unbound pinned D2H 21.22 GB/s, 19% below DeepSpeed's launcher). Ascend one device, hidden as pending: 6.48 -> 25.97 and 6.71 -> 26.49 GB/s (4.0x / 3.9x, unbound placeholder). -->
 
 Only part of a step is copying: on one H200, host-to-device copies were 5.3× faster and device-to-host copies 3.1× faster, while training steps were 1.15× to 3.79× faster. With all eight H200 GPUs copying, pinned bandwidth per GPU halves while pageable bandwidth falls only 15–17%, so the speedup shrinks. The halving is consistent with GPU pairs sharing PCIe switch uplinks on our server, though a cap on total host bandwidth would look the same; pageable copies are limited by CPU staging rather than the link. Pinned copies in eight-GPU training ran at the same ceiling as this benchmark. Placement also starts to reach pinned copies: with all eight GPUs copying, unbound pinned device-to-host copies were 19% slower than under either launcher's binding, while with one GPU they were unchanged.
 
@@ -134,20 +135,20 @@ We compared four PyTorch training frameworks: PyTorch itself (including FSDP), H
 | Hugging Face Transformers and Accelerate | Through PyTorch's allocator; offload is delegated to DeepSpeed or FSDP | Binds cores only, not memory | One by default on GPUs; set by the user |
 | Megatron-LM, with Transformer Engine | Through PyTorch's allocator; on by default for offload | Left to the user | Left to the user |
 
-<!-- Sources and the exact flags per framework: ARXIV_DRAFT.md ("Across the PyTorch ecosystem"). DeepSpeed defaults verified in deepspeed/runtime/zero/offload_config.py, runtime/activation_checkpointing/offload_activations.py, launcher/launch.py, and utils/numa.py. -->
+<!-- Sources and the exact flags per framework: ARXIV_DRAFT.md at 3d2fd3b ("Across the PyTorch ecosystem"). DeepSpeed defaults verified in deepspeed/runtime/zero/offload_config.py, runtime/activation_checkpointing/offload_activations.py, launcher/launch.py, and utils/numa.py. -->
 
 In short, DeepSpeed provides everything practitioners need to maximize offload performance with the least setup: pinning is on by default, and one launcher option binds each rank's cores and memory and sets its threads to match. Elsewhere, users reach the same settings only by configuring them separately; torchrun, for example, leaves a CPU optimizer on one thread per rank unless the user changes it.
 
-<!-- Evidence (8xH200, ARXIV_DRAFT.md, job-20261113T151443Z): with memory pinned and OMP_NUM_THREADS set by hand, torchrun --numa-binding=node ties deepspeed --bind_cores_to_rank on every workload (within 1%), so the blog claims ease of use, not speed. At torchrun's default one thread, pinned optimizer offload was 17.73 s vs 9.78 s (Qwen3-32B). -->
+<!-- Evidence (8xH200, ARXIV_DRAFT.md at 3d2fd3b, job-20261113T151443Z): with memory pinned and OMP_NUM_THREADS set by hand, torchrun --numa-binding=node ties deepspeed --bind_cores_to_rank on every workload (within 1%), so the blog claims ease of use, not speed. At torchrun's default one thread, pinned optimizer offload was 17.73 s vs 9.78 s (Qwen3-32B). -->
 
 Can launcher binding replace binding each process by hand with a low-level tool such as numactl? On the H200, DeepSpeed's launcher matched it within 3% of step time on every training workload, single and multi-device. torchrun's binding matched it on pinned steps once the thread count was set to match. Some gaps remain, and we see them as areas for the frameworks to improve:
 
 - **DeepSpeed's launcher** assigns cores by rank order, not by each accelerator's location, so it binds correctly only when that order lines up with the accelerators' NUMA nodes, as on our H200 host. Its memory binding is strict, so a rank cannot spill to the other node when its own fills up. On a multi-socket host, a single process binds memory only when told which cores to use.
 - **torchrun** binds cores but not memory, which leaves pageable training steps slow, and it does not set threads to match the binding.
 
-<!-- Evidence: ARXIV_DRAFT.md. Single H200 (job-20261113T215205Z), DeepSpeed launcher vs per-process numactl --cpunodebind --preferred, pageable -> pinned: model-tensor 10.55 -> 3.86 vs 10.36 -> 3.75 s; checkpoint 256K 52.07 -> 45.44 vs 52.04 -> 45.42 s; saved-activation 64K 90.81 -> 33.11 vs 89.91 -> 33.06 s. 8xH200: saved-activation pin 2.53x vs 2.56x (Qwen3-8B), 2.57x vs 2.55x (Qwen3.5-9B); optimizer offload 15.41 -> 9.78 vs 15.53 -> 9.73 s; copies within 0.4 GB/s. torchrun pageable lags (single H200 saved-activation 124.67 s vs 90.81 s), pinned ties. Gaps from deepspeed/utils/numa.py (cores by local rank; -m only when a rank's cores fit one node; no core list = all physical cores, so no -m with one process) and torch/numa/binding.py (numactl --physcpubind only). Because the launcher matches numactl, the numactl-bound H200 results the blog still cites (registration, huge pages, backend tie) carry over; a launcher rerun is not required. -->
+<!-- Evidence: ARXIV_DRAFT.md at 3d2fd3b. Single H200 (job-20261113T215205Z), DeepSpeed launcher vs per-process numactl --cpunodebind --preferred, pageable -> pinned: model-tensor 10.55 -> 3.86 vs 10.36 -> 3.75 s; checkpoint 256K 52.07 -> 45.44 vs 52.04 -> 45.42 s; saved-activation 64K 90.81 -> 33.11 vs 89.91 -> 33.06 s. 8xH200: saved-activation pin 2.53x vs 2.56x (Qwen3-8B), 2.57x vs 2.55x (Qwen3.5-9B); optimizer offload 15.41 -> 9.78 vs 15.53 -> 9.73 s; copies within 0.4 GB/s. torchrun pageable lags (single H200 saved-activation 124.67 s vs 90.81 s), pinned ties. Gaps from deepspeed/utils/numa.py (cores by local rank; -m only when a rank's cores fit one node; no core list = all physical cores, so no -m with one process) and torch/numa/binding.py (numactl --physcpubind only). Because the launcher matches numactl, the numactl-bound H200 results the blog still cites (registration, huge pages, backend tie) carry over; a launcher rerun is not required. -->
 
-The [full technical report](ARXIV_DRAFT.md) lists the flags and settings for each framework.
+The [benchmark README](https://github.com/sfc-gh-truwase/DeepSpeedExamples/tree/tjruwase/pin-memory-experiments/benchmarks/pin_memory) lists the flags and settings for each framework.
 
 ## Best practices
 
@@ -163,7 +164,7 @@ CPU offload buys capacity with host memory, and three host-side settings decide 
 
 As future work, we plan to extend this study to machines where the CPU and accelerator share a coherent chip-to-chip (C2C) link instead of PCIe, such as NVIDIA Grace Hopper and Grace Blackwell. There, the accelerator can access host memory over that link, including pageable memory, and accelerator memory can appear as its own NUMA node. Whether pinning, NUMA placement, and CPU threads play the same roles there is an open question.
 
-The benchmarks are in [DeepSpeedExamples `benchmarks/pin_memory`](https://github.com/sfc-gh-truwase/DeepSpeedExamples/tree/tjruwase/pin-memory-experiments/benchmarks/pin_memory), and the [full technical report](ARXIV_DRAFT.md) has the details. <!-- TODO: switch to deepspeedai/DeepSpeedExamples master and the arXiv link. -->
+The benchmarks, the settings for each framework, and the commands to reproduce every result are in [DeepSpeedExamples `benchmarks/pin_memory`](https://github.com/sfc-gh-truwase/DeepSpeedExamples/tree/tjruwase/pin-memory-experiments/benchmarks/pin_memory). <!-- TODO: switch to deepspeedai/DeepSpeedExamples master. -->
 
 ## Contributors
 
