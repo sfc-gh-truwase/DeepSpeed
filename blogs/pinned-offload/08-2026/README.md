@@ -39,7 +39,7 @@ We evaluated four workloads. The first measures the copies themselves; the other
 
 On a single device, the two activation workloads also offload the optimizer, and pinning covers its host buffers too. The multi-device activation runs keep the optimizer on the accelerator.
 
-We ran them on three accelerator types: NVIDIA H200, Huawei Ascend 910B4, and Intel Arc Pro B60, each within a single host (multi-node runs were not tested). Each training workload uses two Hugging Face model families in separate tables: Qwen3 (dense) and Qwen3.5 (hybrid linear and full attention), randomly initialized, in bf16, at batch size 1. Model size and sequence length differ by machine, so compare results within a column, not across columns. The full report lists hardware and software versions. Where a run is bound to the accelerator's NUMA node, it uses only a launcher's own binding, never an external tool.
+We ran them on three accelerator types: NVIDIA H200, Huawei Ascend 910B4, and Intel Arc Pro B60, each within a single host (multi-node runs were not tested). Each training workload uses two Hugging Face model families in separate tables: Qwen3 (dense) and Qwen3.5 (hybrid linear and full attention), randomly initialized, in bf16, at batch size 1. Model size and sequence length differ by machine, so compare results within a column, not across columns. The full report lists hardware and software versions. Where a speedup comes from a bound run, the binding is a launcher's own, never an external tool; the full report notes the few supporting results that were bound with numactl instead.
 
 ### Single device: pinning
 
@@ -118,7 +118,7 @@ Only part of a step is copying: on one H200, host-to-device copies were 5.3× fa
 
 - **Pinning is the biggest single lever when the step is copy-bound.** From an untuned start, it alone made 8-GPU saved-activation offload 5.98× faster, against 2.49× for NUMA binding alone. Against a bound pageable run it was still 2.53×.
 - **When the CPU computes, threads matter as much as pinning.** With the optimizer offloaded, CPU Adam is host compute that pinning cannot speed up. Giving it 12 threads per rank was worth 1.51×, close to pinning's 1.70×, and all three settings together gave 3.08× on Qwen3-32B. The settings interact: a pinned step with one thread was still slower than a pageable step with binding and threads.
-- **Pinning makes placement matter less, not zero.** On 8×H200, binding moved the pageable step by up to 2.8×, a gain binding cores alone did not capture. The pinned step moved by about 5% or less, except on Qwen3.5: 23% for saved-activation offload and 11% for optimizer offload with 12 threads; binding cores alone closed both. An unbound comparison can overstate the benefit of pinning by up to 2.4×. On the Ascend, a remote NUMA node still slowed pinned device-to-host copies by about 26%.
+- **Pinning makes placement matter less, not zero.** On 8×H200, binding moved the pageable step by up to 2.8×, a gain binding cores alone did not capture. The pinned step moved by about 5% or less, except on Qwen3.5: 23% for saved-activation offload and 11% for optimizer offload with 12 threads; binding cores alone closed both. An unbound comparison can overstate the benefit of pinning by up to 2.4×.
 - **Contention caps multi-device pinned copies.** On our 8×H200 server, pinned copy bandwidth per GPU halved when all eight GPUs copied, while pageable bandwidth fell only 15–17%, so the per-GPU pin advantage shrank from 5.3× to 3.3× host to device.
 - **Registration, not page-locking, makes host memory fast.** On the H200, memory that was locked but not registered with the device driver copied at pageable speed.
 - **Some settings did not help.** On the H200, huge pages changed step time by at most 4% once placement was fixed, and the two pinning backends tied once memory was registered.
@@ -140,7 +140,14 @@ In short, DeepSpeed provides everything practitioners need to maximize offload p
 
 <!-- Evidence (8xH200, ARXIV_DRAFT.md, job-20261113T151443Z): with memory pinned and OMP_NUM_THREADS set by hand, torchrun --numa-binding=node ties deepspeed --bind_cores_to_rank on every workload (within 1%), so the blog claims ease of use, not speed. At torchrun's default one thread, pinned optimizer offload was 17.73 s vs 9.78 s (Qwen3-32B). -->
 
-DeepSpeed's binding assumes accelerators are numbered in NUMA order; on hosts where they are not, bind ranks manually. The [full technical report](ARXIV_DRAFT.md) lists the flags and settings for each framework.
+Can launcher binding replace binding each process by hand with a low-level tool such as numactl? On the H200, DeepSpeed's launcher matched it within 3% of step time on every training workload, single and multi-device. torchrun's binding matched it on pinned steps once the thread count was set to match. Some gaps remain, and we see them as areas for the frameworks to improve:
+
+- **DeepSpeed's launcher** assigns cores by rank order, not by each accelerator's location, so it binds correctly only when that order lines up with the accelerators' NUMA nodes, as on our H200 host. Its memory binding is strict, so a rank cannot spill to the other node when its own fills up. On a multi-socket host, a single process binds memory only when told which cores to use.
+- **torchrun** binds cores but not memory, which leaves pageable training steps slow, and it does not set threads to match the binding.
+
+<!-- Evidence: ARXIV_DRAFT.md. Single H200 (job-20261113T215205Z), DeepSpeed launcher vs per-process numactl --cpunodebind --preferred, pageable -> pinned: model-tensor 10.55 -> 3.86 vs 10.36 -> 3.75 s; checkpoint 256K 52.07 -> 45.44 vs 52.04 -> 45.42 s; saved-activation 64K 90.81 -> 33.11 vs 89.91 -> 33.06 s. 8xH200: saved-activation pin 2.53x vs 2.56x (Qwen3-8B), 2.57x vs 2.55x (Qwen3.5-9B); optimizer offload 15.41 -> 9.78 vs 15.53 -> 9.73 s; copies within 0.4 GB/s. torchrun pageable lags (single H200 saved-activation 124.67 s vs 90.81 s), pinned ties. Gaps from deepspeed/utils/numa.py (cores by local rank; -m only when a rank's cores fit one node; no core list = all physical cores, so no -m with one process) and torch/numa/binding.py (numactl --physcpubind only). Because the launcher matches numactl, the numactl-bound H200 results the blog still cites (registration, huge pages, backend tie) carry over; a launcher rerun is not required. -->
+
+The [full technical report](ARXIV_DRAFT.md) lists the flags and settings for each framework.
 
 ## Best practices
 
