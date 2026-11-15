@@ -46,9 +46,9 @@ We ran them on three accelerator types: NVIDIA H200, Huawei Ascend 910B4, and In
 
 <!-- FIGURE: media/single_device.png — pin speedup per workload, one panel per machine, Qwen3 and Qwen3.5 as separate bars. -->
 
-| Workload | Model | H200 | Ascend 910B4 | Arc Pro B60 |
-|----------|-------|------|--------------|-------------|
-| Model-tensor offload | Qwen3 | **2.73×** (4K tokens) | *pending* | *pending* |
+| Workload | Model | H200 (Tokens) | Ascend 910B4 (Tokens) | Arc Pro B60 (Tokens) |
+|----------|-------|---------------|-----------------------|----------------------|
+| Model-tensor offload | Qwen3 | **2.73×** (4K) | *pending* | *pending* |
 | | Qwen3.5 | **2.78×** (4K) | *pending* | *pending* |
 | Activation checkpoint offload | Qwen3 | **1.15×** (256K) | *pending* | *pending* |
 | | Qwen3.5 | **1.15×** (256K) | *pending* | *pending* |
