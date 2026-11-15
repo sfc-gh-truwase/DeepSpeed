@@ -36,7 +36,7 @@ We evaluated four workloads. The first measures the copies themselves; the other
 - **Host-device copies.** A microbenchmark that copies 256 MiB host buffers to the accelerator and back, the transfer every offload workload depends on.
 - **Model-tensor offload.** Parameters and optimizer states live in host memory and are copied to the accelerator as needed (DeepSpeed ZeRO CPU offload). The multi-device runs offload only the optimizer and keep the parameters on the accelerator.
 - **Activation checkpoint offload.** The inputs saved by activation checkpointing go to host memory in the forward pass and come back for recomputation (DeepSpeed CPU checkpointing).
-- **Saved-activation offload.** Every tensor saved for the backward pass inside each decoder layer goes to host memory and comes back, with no recomputation. This one is a benchmark built on DeepSpeed's pinned memory, not yet a DeepSpeed option.
+- **Saved-activation offload.** Every tensor saved for the backward pass inside each decoder layer goes to host memory and comes back, with no recomputation. This one is a DeepSpeedExamples recipe built on DeepSpeed's pinned memory, accelerator APIs, and ZeRO engine; the offload logic itself lives in the recipe, not in DeepSpeed.
 
 On a single device, the two activation workloads also offload the optimizer, and pinning covers its host buffers too. The multi-device activation runs keep the optimizer on the accelerator.
 
@@ -68,7 +68,7 @@ Speedup is the pageable step time divided by the pinned step time, with both run
 
 ### Multiple devices: pinning, NUMA placement, and CPU threads
 
-With several ranks on one host, the ranks share host memory, sockets, and cores, so placement and threads start to matter alongside pinning. The tables below start from an untuned launch (ranks unbound, memory pageable, one OpenMP thread per rank), on 8×H200. Each number is the untuned step time divided by the step time with the named setting changed; **All** changes every setting that applies to the workload. NUMA binding and **All** use DeepSpeed's launcher binding, except where noted below.
+With several ranks on one host, the ranks share host memory, sockets, and cores, so placement and threads start to matter alongside pinning. The tables below start from an untuned launch (ranks unbound, memory pageable, one OpenMP thread per rank), on 8×H200. Pinning is off in this launch, although DeepSpeed pins by default. Each number is the untuned step time divided by the step time with the named setting changed; **All** changes every setting that applies to the workload. NUMA binding and **All** use DeepSpeed's launcher binding, except where noted below.
 
 <!-- FIGURE: media/levers.png — speedup from the untuned launch for each setting alone and all together, one group per workload, one panel per machine. -->
 
@@ -76,7 +76,7 @@ With several ranks on one host, the ranks share host memory, sockets, and cores,
 
 | Workload | Pinning | NUMA binding | CPU threads | All |
 |----------|---------|--------------|-------------|-----|
-| Optimizer offload, Qwen3-32B, 4K tokens per GPU | 1.70× | 0.89× | 1.51× | **3.08×** |
+| Optimizer offload, Qwen3-32B, 4K tokens per GPU | 1.68× | 0.89× (cores only) | 1.51× | **2.97×** |
 | Activation checkpoint offload, Qwen3-8B, 256K tokens per GPU | 1.24× | 1.13× | — | **1.24×** |
 | Saved-activation offload, Qwen3-8B, 16K tokens per GPU | 5.98× | 2.49× | — | **6.29×** |
 
@@ -84,13 +84,15 @@ With several ranks on one host, the ranks share host memory, sockets, and cores,
 
 | Workload | Pinning | NUMA binding | CPU threads | All |
 |----------|---------|--------------|-------------|-----|
-| Optimizer offload, Qwen3.5-27B, 4K tokens per GPU | 1.62× | 1.07× | 1.55× | **2.84×** |
+| Optimizer offload, Qwen3.5-27B, 4K tokens per GPU | 1.62× | 1.07× (cores only) | 1.55× | **2.86×** |
 | Activation checkpoint offload, Qwen3.5-9B, 256K tokens per GPU | 1.22× | 1.12× | — | **1.22×** |
 | Saved-activation offload, Qwen3.5-9B, 16K tokens per GPU | 5.79× | 2.78× | — | **7.14×** |
 
 *Ascend 910B4 and Arc Pro B60 multi-device results: pending.* <!-- TODO: Ascend 910B4 and Arc Pro B60 multi-device tables. -->
 
-A dash means the setting does not apply: the activation workloads keep the optimizer on the GPU, so there is no host compute to thread. DeepSpeed's launcher always sets threads along with binding, so optimizer-offload binding alone uses torchrun's core-only binding with one thread, from a later job and measured against the untuned launch in that job. It did not help (0.89× and 1.07×), because torchrun binds cores but not memory. With pinning off, DeepSpeed's binding and threads together gave 1.96× on Qwen3-32B and 1.80× on Qwen3.5-27B; with pinning on, that launch is the **All** column. The checkpoint-offload rows pack 4K-token samples into each step; the saved-activation rows train one 16K-token sequence per GPU.
+<!-- Sources, optimizer offload: Pinning, NUMA binding, and All from job-20261113T151443Z, all against that job's untuned launch (torchrun unbound, one thread). Qwen3-32B untuned 28.83 s; pinned 17.18 s (1.68x); torchrun --numa-binding=node 32.52 s (0.89x); deepspeed --bind_cores_to_rank pageable 15.35 s (1.88x), pinned 9.71 s (2.97x). Qwen3.5-27B untuned 22.82 s; pinned 14.06 s (1.62x); torchrun binding 21.33 s (1.07x); DeepSpeed launcher pageable 12.61 s (1.81x), pinned 7.97 s (2.86x). CPU threads from job-20261111T024327Z (unbound, 12 threads, pageable): 30.16 -> 20.02 s (1.51x), 22.71 -> 14.67 s (1.55x). Earlier drafts divided the Nov 11 untuned step by later launcher times (3.08x, 1.96x, 2.84x, 1.80x); replaced 2026-11-14. Activation checkpoint: job-20261112T192249Z. Saved-activation: job-20261110T223544Z. -->
+
+A dash means the setting does not apply: the activation workloads keep the optimizer on the GPU, so there is no host compute to thread. DeepSpeed's launcher always sets threads along with binding, so for optimizer offload the NUMA binding column uses torchrun's core-only binding with one thread. It did not help (0.89× and 1.07×), because torchrun binds cores but not memory. With pinning off, DeepSpeed's binding and threads together gave 1.88× on Qwen3-32B and 1.81× on Qwen3.5-27B; with pinning on, that launch is the **All** column. The optimizer-offload CPU threads column comes from an earlier job, against the untuned launch in that job. The checkpoint-offload rows pack 4K-token samples into each step; the saved-activation rows train one 16K-token sequence per GPU.
 
 Because the starting point is unbound and pageable, the Pinning column also recovers some of the slowdown that binding fixes. Against a pageable run bound by DeepSpeed's launcher, pinning alone was 1.10× for Qwen3-8B checkpoint offload and 2.53× (Qwen3-8B) and 2.57× (Qwen3.5-9B) for saved-activation offload.
 
@@ -118,7 +120,7 @@ Only part of a step is copying: on one H200, host-to-device copies were 5.3× fa
 ### What the results show
 
 - **Pinning is the biggest single lever when the step is copy-bound.** From an untuned start, it alone made 8-GPU saved-activation offload 5.98× faster, against 2.49× for NUMA binding alone. Against a bound pageable run it was still 2.53×.
-- **When the CPU computes, threads matter as much as pinning.** With the optimizer offloaded, CPU Adam is host compute that pinning cannot speed up. Giving it 12 threads per rank was worth 1.51×, close to pinning's 1.70×, and all three settings together gave 3.08× on Qwen3-32B. The settings interact: a pinned step with one thread was still slower than a pageable step with binding and threads.
+- **When the CPU computes, threads matter as much as pinning.** With the optimizer offloaded, CPU Adam is host compute that pinning cannot speed up. Giving it 12 threads per rank was worth 1.51×, close to pinning's 1.68×, and all three settings together gave 2.97× on Qwen3-32B. The settings interact: a pinned step with one thread was still slower than a pageable step with binding and threads.
 - **Pinning makes placement matter less, not zero.** On 8×H200, binding moved the pageable step by up to 2.8×, a gain binding cores alone did not capture. The pinned step moved by about 5% or less, except on Qwen3.5: 23% for saved-activation offload and 11% for optimizer offload with 12 threads; binding cores alone closed both. An unbound comparison can overstate the benefit of pinning by up to 2.4×.
 - **Contention caps multi-device pinned copies.** On our 8×H200 server, pinned copy bandwidth per GPU halved when all eight GPUs copied, while pageable bandwidth fell only 15–17%, so the per-GPU pin advantage shrank from 5.3× to 3.3× host to device.
 - **Registration, not page-locking, makes host memory fast.** On the H200, memory that was locked but not registered with the device driver copied at pageable speed.
@@ -126,18 +128,18 @@ Only part of a step is copying: on one H200, host-to-device copies were 5.3× fa
 
 ## Framework support in the PyTorch ecosystem
 
-We compared four PyTorch training frameworks: PyTorch itself (including FSDP), Hugging Face Transformers and Accelerate, Megatron-LM with Transformer Engine, and DeepSpeed. Among them, DeepSpeed gives the most control over the three settings, and it is the only one that can set all three itself.
+We compared four PyTorch training frameworks: PyTorch itself (including FSDP), Hugging Face Transformers and Accelerate, Megatron-LM with Transformer Engine, and DeepSpeed. Among them, DeepSpeed is the only one whose launcher binds each rank's memory as well as its cores and sets the rank's threads to match.
 
 | Framework | Pinning | NUMA placement | CPU threads per rank |
 |-----------|---------|----------------|----------------------|
-| **DeepSpeed** | **On by default, adjustable per offloaded buffer, with a choice of pinning backend** | **Launcher option binds each rank's cores and memory** | **Same option matches threads to each rank's cores** |
+| **DeepSpeed** | **On by default, adjustable per offloaded buffer** | **Launcher option binds each rank's cores and memory** | **Same option matches threads to each rank's cores** |
 | PyTorch, including FSDP | Through PyTorch's allocator; on by default for FSDP offload | Binds cores only, not memory | One by default; set by the user |
-| Hugging Face Transformers and Accelerate | Through PyTorch's allocator; offload is delegated to DeepSpeed or FSDP | Binds cores only, not memory | One by default on GPUs; set by the user |
+| Hugging Face Transformers and Accelerate | Through PyTorch's allocator; offload is delegated to DeepSpeed or FSDP | Binds cores near each GPU, not memory | One by default on GPUs; set by the user |
 | Megatron-LM, with Transformer Engine | Through PyTorch's allocator; on by default for offload | Left to the user | Left to the user |
 
 <!-- Sources and the exact flags per framework: ARXIV_DRAFT.md at 3d2fd3b ("Across the PyTorch ecosystem"). DeepSpeed defaults verified in deepspeed/runtime/zero/offload_config.py, runtime/activation_checkpointing/offload_activations.py, launcher/launch.py, and utils/numa.py. -->
 
-In short, DeepSpeed provides everything practitioners need to maximize offload performance with the least setup: pinning is on by default, and one launcher option binds each rank's cores and memory and sets its threads to match. Elsewhere, users reach the same settings only by configuring them separately; torchrun, for example, leaves a CPU optimizer on one thread per rank unless the user changes it.
+In short, DeepSpeed covers all three settings with the least setup: pinning is on by default, and one launcher option binds each rank's cores and memory and sets its threads to match. Elsewhere, users reach the same settings only by configuring them separately; torchrun, for example, leaves a CPU optimizer on one thread per rank unless the user changes it.
 
 <!-- Evidence (8xH200, ARXIV_DRAFT.md at 3d2fd3b, job-20261113T151443Z): with memory pinned and OMP_NUM_THREADS set by hand, torchrun --numa-binding=node ties deepspeed --bind_cores_to_rank on every workload (within 1%), so the blog claims ease of use, not speed. At torchrun's default one thread, pinned optimizer offload was 17.73 s vs 9.78 s (Qwen3-32B). -->
 
@@ -153,14 +155,14 @@ The [benchmark README](https://github.com/sfc-gh-truwase/DeepSpeedExamples/tree/
 ## Best practices
 
 - **Keep pinning on.** It helped every workload we measured; turn it off only when the job cannot lock enough host memory for its offloaded buffers.
-- **Bind each rank to its accelerator's NUMA node.** On the H200, with pinned memory and threads set, binding cores was enough. If pinning is not an option, use DeepSpeed's launcher, which binds each rank's memory as well as its cores; binding cores alone is not enough for pageable memory.
+- **Bind each rank to its accelerator's NUMA node.** On the H200, with pinned memory and threads set, binding cores was enough. If pinning is not an option, use DeepSpeed's launcher with core binding turned on, which binds each rank's memory as well as its cores; binding cores alone is not enough for pageable memory.
 - **Give a CPU optimizer all the cores its rank owns.**
 - **Measure on your own host, against a bound baseline.** Results do not transfer between machines.
 - **Don't count on huge pages or a different pinning backend for speed.** On the H200, huge pages changed step time by at most 4%, and the two backends tied.
 
 ## Conclusion
 
-CPU offload buys capacity with host memory, and three host-side settings decide how much speed that capacity costs. Pinning is the biggest single lever when the step is dominated by copies, giving up to 3.79× on one H200 and 2.57× on eight, both on Qwen3.5 saved-activation offload against a bound pageable baseline. When the CPU computes, as with an offloaded optimizer, CPU threads matter as much, and the three settings together made an 8-GPU optimizer-offload step 2.84× to 3.08× faster than an untuned launch. Keep pinning on, bind each rank to its accelerator's NUMA node, and give the CPU optimizer its cores.
+CPU offload buys capacity with host memory, and three host-side settings decide how much speed that capacity costs. Pinning is the biggest single lever when the step is dominated by copies: against a bound pageable baseline, it made DeepSpeed ZeRO CPU offload 2.73× to 2.78× faster on one H200, and our saved-activation offload recipe up to 3.79× faster on one H200 and 2.57× on eight. When the CPU computes, as with an offloaded optimizer, CPU threads matter as much, and the three settings together made an 8-GPU optimizer-offload step 2.86× to 2.97× faster than an untuned launch. Keep pinning on, bind each rank to its accelerator's NUMA node, and give the CPU optimizer its cores.
 
 As future work, we plan to extend this study to machines where the CPU and accelerator share a coherent chip-to-chip (C2C) link instead of PCIe, such as NVIDIA Grace Hopper and Grace Blackwell. There, the accelerator can access host memory over that link, including pageable memory, and accelerator memory can appear as its own NUMA node. Whether pinning, NUMA placement, and CPU threads play the same roles there is an open question.
 
