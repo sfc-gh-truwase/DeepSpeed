@@ -46,14 +46,14 @@ We ran them on three accelerator types: NVIDIA H200, Huawei Ascend 910B4, and In
 
 <!-- FIGURE: media/single_device.png — pin speedup per workload, one panel per machine, Qwen3 and Qwen3.5 as separate bars. -->
 
-| Workload | Tokens | Model | H200 | Ascend 910B4 | Arc Pro B60 |
-|----------|--------|-------|------|--------------|-------------|
-| Model-tensor offload | 4K | Qwen3 | **2.73×** | *pending* | *pending* |
-| | | Qwen3.5 | **2.78×** | *pending* | *pending* |
-| Activation checkpoint offload | 256K | Qwen3 | **1.15×** | *pending* | *pending* |
-| | | Qwen3.5 | **1.15×** | *pending* | *pending* |
-| Saved-activation offload | 64K | Qwen3 | **2.74×** | *pending* | *pending* |
-| | | Qwen3.5 | **3.79×** | *pending* | *pending* |
+| Workload | Model | H200 | Ascend 910B4 | Arc Pro B60 |
+|----------|-------|------|--------------|-------------|
+| Model-tensor offload | Qwen3 | **2.73×** (4K tokens) | *pending* | *pending* |
+| | Qwen3.5 | **2.78×** (4K) | *pending* | *pending* |
+| Activation checkpoint offload | Qwen3 | **1.15×** (256K) | *pending* | *pending* |
+| | Qwen3.5 | **1.15×** (256K) | *pending* | *pending* |
+| Saved-activation offload | Qwen3 | **2.74×** (64K) | *pending* | *pending* |
+| | Qwen3.5 | **3.79×** (64K) | *pending* | *pending* |
 
 Model sizes differ by machine: Qwen3-8B and Qwen3.5-9B on the H200, Qwen3-4B and Qwen3.5-4B on the Ascend 910B4, and Qwen3-0.6B and Qwen3.5-0.8B on the Arc Pro B60.
 
