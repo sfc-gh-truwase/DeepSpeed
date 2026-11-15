@@ -1,7 +1,7 @@
 # Blog Plan — Efficient CPU Offload
 
 **Audience:** agent or writer drafting the blog and collecting benchmarks.\
-**Venue:** one article (user, 2026-11-14). [`README.md`](README.md) is the **short, high-level blog**: intro, tuning impact (speedup tables only), framework support, best practices. There is no long version (user, 2026-11-14): `ARXIV_DRAFT.md` was removed (git history, commit 3d2fd3b), and methodology, settings per framework, and reproduction moved to the [DeepSpeedExamples `benchmarks/pin_memory` README](https://github.com/sfc-gh-truwase/DeepSpeedExamples/tree/tjruwase/pin-memory-experiments/benchmarks/pin_memory); the blog links to it. Most of this plan (benchmark matrix, claims, narrative arc, outline) was written for the removed draft and is kept as background; the blog's layout is the first section of [`LAYOUT.md`](LAYOUT.md). B60 rows, bound Ascend reruns, and Ascend/B60 multi-device results are pending.\
+**Venue:** one article (user, 2026-11-14). [`README.md`](README.md) is the **short, high-level blog**: intro, tuning impact (speedup tables only), framework support, best practices. There is no long version (user, 2026-11-14): `ARXIV_DRAFT.md` was removed (git history, commit 3d2fd3b), and methodology, settings per framework, and reproduction moved to the [DeepSpeedExamples `benchmarks/cpu_offload` README](https://github.com/sfc-gh-truwase/DeepSpeedExamples/tree/tjruwase/pin-memory-experiments/benchmarks/cpu_offload); the blog links to it. Most of this plan (benchmark matrix, claims, narrative arc, outline) was written for the removed draft and is kept as background; the blog's layout is the first section of [`LAYOUT.md`](LAYOUT.md). B60 rows, bound Ascend reruns, and Ascend/B60 multi-device results are pending.\
 **Layout peer only:** [`blogs/deepspeed-offloadpp/README.md`](../../deepspeed-offloadpp/README.md) (README/media shape). **Do not** copy its ZeRO-product lede, hero speedup, or “we release feature X” voice.\
 **Related:** experiment/DSE work is [`EXPERIMENTS_HANDOFF.md`](EXPERIMENTS_HANDOFF.md) (out of scope for the blog writer). Phase 2 routing is already on DeepSpeed `master` ([`PHASE2_PR_HANDOFF.md`](PHASE2_PR_HANDOFF.md) is historical).
 
@@ -101,7 +101,7 @@ Config orthogonality (document under Best practices, not as the intro):
 11. **What’s next** — Closing paragraph of the Conclusion, not its own heading: XPU `register_host_memory`; saved-activation stays a benchmark unless promoted.
 12. **Appendix: reproducing the results** — Commands grouped single accelerator then eight GPUs, under the NUMA binding; how to rerun the placement and thread arms; `--prefetch 2` passed explicitly; the saved-activation settings rationale.
 
-All pin experiments live under DeepSpeedExamples `benchmarks/pin_memory` (`model_tensor_offload/`, `activation_offload/`, `saved_activation_offload/`, `h2d_d2h/`). Until they merge upstream, the dev fork is [`sfc-gh-truwase/DeepSpeedExamples` `tjruwase/pin-memory-experiments`](https://github.com/sfc-gh-truwase/DeepSpeedExamples/tree/tjruwase/pin-memory-experiments/benchmarks/pin_memory), and the README links there; switch the links to `deepspeedai/DeepSpeedExamples` master at merge. The fork's `PUBLISH_TRACKER.md` tracks the remaining rows.
+All pin experiments live under DeepSpeedExamples `benchmarks/cpu_offload` (`model_tensor_offload/`, `activation_offload/`, `saved_activation_offload/`, `h2d_d2h/`). Until they merge upstream, the dev fork is [`sfc-gh-truwase/DeepSpeedExamples` `tjruwase/pin-memory-experiments`](https://github.com/sfc-gh-truwase/DeepSpeedExamples/tree/tjruwase/pin-memory-experiments/benchmarks/cpu_offload), and the README links there; switch the links to `deepspeedai/DeepSpeedExamples` master at merge. The fork's `PUBLISH_TRACKER.md` tracks the remaining rows.
 
 **Dev fork synced with the blog (2026-11-05, `c535c6f`):** the `cuda/run.sh` launchers run the published H200 rows (activation checkpoint and saved-activation at seq 65536; saved-activation with `--offload-tensors -1 --credits 1 --prefetch 2 --act-mem-opt`, 10 steps / 1 warmup; `MODEL=` and `SEQ=` override). The saved-activation `npu/run.sh` uses the H200 flags for the bound Ascend rerun (the earlier unbound 1.14× row used K=3). The fork READMEs list the blog-row commands, and `PUBLISH_TRACKER.md` carries the remaining rows. The fork now holds only the three workloads plus `h2d_d2h/` (`7e76ba7` removed `grad_offload/`, `cpu_pin/`, `deepcompile_activation/`, and `dynamic_tensor_offload/`). Published step counts: 10 steps for every e2e row; warmup 1 for the activation workloads.
 
@@ -158,7 +158,7 @@ The post must show **published Hugging Face architectures**, not only a syntheti
 
 ### Harnesses
 
-**Model-tensor e2e (required):** [DeepSpeedExamples `benchmarks/pin_memory` (dev fork)](https://github.com/sfc-gh-truwase/DeepSpeedExamples/tree/tjruwase/pin-memory-experiments/benchmarks/pin_memory) — `model_tensor_offload/bench.py` (root `zero3_offload_bench.py` still delegates to ZeRO-3).
+**Model-tensor e2e (required):** [DeepSpeedExamples `benchmarks/cpu_offload` (dev fork)](https://github.com/sfc-gh-truwase/DeepSpeedExamples/tree/tjruwase/pin-memory-experiments/benchmarks/cpu_offload) — `model_tensor_offload/bench.py` (root `zero3_offload_bench.py` still delegates to ZeRO-3).
 
 Default driver (two subprocesses, fresh rendezvous each):
 
@@ -394,7 +394,7 @@ Headings stay **accelerator-neutral**. No “ZeRO” and no PR numbers in H2/H3 
 
 Collection order (hardware access) is not article order.
 
-1. Pin experiments: [DeepSpeedExamples `benchmarks/pin_memory` (dev fork)](https://github.com/sfc-gh-truwase/DeepSpeedExamples/tree/tjruwase/pin-memory-experiments/benchmarks/pin_memory) on DeepSpeed **`master`**. Land `activation_offload --model` before published HF rows.
+1. Pin experiments: [DeepSpeedExamples `benchmarks/cpu_offload` (dev fork)](https://github.com/sfc-gh-truwase/DeepSpeedExamples/tree/tjruwase/pin-memory-experiments/benchmarks/cpu_offload) on DeepSpeed **`master`**. Land `activation_offload --model` before published HF rows.
 2. Collect **model-tensor** Qwen3 + **H2D/D2H** on B60, then H200. Ascend 910B4 Qwen3-4B rows are already measured.
 3. Collect the **activation checkpoint workload** (`--offload-optimizer --act-mem-opt`, async on, pin on/off) on B60 and H200. Ascend 910B4 Qwen3-4B seq 8192 is already measured. Named limitation if the B60 engine fails — do not invent numbers.
 4. Collect **saved-activation** pin on/off on H200 (Qwen3-8B, `N=1`, `--offload-tensors -1`, seq 8K–64K: collected, jobs `20261011T171729Z` unbound, `20261026T133233Z` and `20261024T171244Z` bound; Qwen3.5-9B collected in rerun job `20261107T202125Z`; the earlier unbound Qwen3.5 run is withdrawn). Ascend 910B4 Qwen3-4B seq 2048 is measured. B60 saved-activation is required and not yet collected. Qwen3.5 is required, own chart.

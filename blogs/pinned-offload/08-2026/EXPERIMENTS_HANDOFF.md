@@ -21,7 +21,7 @@ grep -v THPSAMPLE autorun/logs/job-<ID>.log | grep -c -E '\bNaN\b|Infinity'
 
 The count must be 0. A nonzero count means the job is withdrawn: do not cite its timings, speedups, peak memory, or losses, and do not cite its job ID in docs. Keep the logs. Archive its job script under `autorun/nan_affected/`. The affected job list is `autorun/nan_affected/nan_jobs.txt`.
 
-Background: until 2026-11-06 the bench built model weights from uninitialized memory (`no_init_weights()` with no fill), which produced sporadic NaN losses. `build_hf_causal_lm` in `DeepSpeedExamples/benchmarks/pin_memory/common.py` now fills weights with a fixed seed. Losses from runs before that date are not meaningful, and their timings need a re-run before they are cited.
+Background: until 2026-11-06 the bench built model weights from uninitialized memory (`no_init_weights()` with no fill), which produced sporadic NaN losses. `build_hf_causal_lm` in `DeepSpeedExamples/benchmarks/cpu_offload/common.py` now fills weights with a fixed seed. Losses from runs before that date are not meaningful, and their timings need a re-run before they are cited.
 
 
 ## 0. Where the code is
@@ -32,7 +32,7 @@ Background: until 2026-11-06 the bench built model weights from uninitialized me
 | Branch | `tjruwase/pin-memory-experiments` |
 | Remotes | `origin` = `deepspeedai/DeepSpeedExamples`; `sfc-gh-truwase` = fork |
 | PR status | #1015 (https://github.com/deepspeedai/DeepSpeedExamples/pull/1015) **merged 2026-09-30** — folder-split refactor only, not an open PR. Current branch `tjruwase/pin-memory-experiments` has no PR open yet; open a fresh one against `deepspeedai/DeepSpeedExamples` when ready to cite repro commands. |
-| Harness root | `benchmarks/pin_memory/` |
+| Harness root | `benchmarks/cpu_offload/` |
 
 HF `--model`, `--offload-optimizer`, `--act-mem-opt`, and offload-size reporting live in this nested clone. Push those to `sfc-gh-truwase` and open a **new** PR against `deepspeedai/DeepSpeedExamples` before citing repro commands in the blog — #1015 is already merged, do not try to reuse or reopen it.
 
@@ -113,7 +113,7 @@ This section stands alone. Follow it on any accelerator (CUDA, XPU, Ascend NPU, 
 
 ### Required setup
 
-- **Harness version.** `deepspeedai/DeepSpeedExamples`-layout clone at `sfc-gh-truwase/DeepSpeedExamples`, branch `tjruwase/pin-memory-experiments`, commit **`48de051` or later**. Check with `python benchmarks/pin_memory/h2d_d2h/bench.py --help | grep -- --no-touch`. If the flag is missing, the bench predates the first-write fix, and its pageable H2D numbers are not publishable.
+- **Harness version.** `deepspeedai/DeepSpeedExamples`-layout clone at `sfc-gh-truwase/DeepSpeedExamples`, branch `tjruwase/pin-memory-experiments`, commit **`48de051` or later**. Check with `python benchmarks/cpu_offload/h2d_d2h/bench.py --help | grep -- --no-touch`. If the flag is missing, the bench predates the first-write fix, and its pageable H2D numbers are not publishable.
 - **Record the host environment** alongside every result:
   ```bash
   cat /sys/kernel/mm/transparent_hugepage/enabled /sys/kernel/mm/transparent_hugepage/defrag
@@ -178,7 +178,7 @@ Each host allocation path has its own switch:
 ### Commands (adapt model, sizes, and NUMA node to the SKU)
 
 ```bash
-B=DeepSpeedExamples/benchmarks/pin_memory
+B=DeepSpeedExamples/benchmarks/cpu_offload
 N=<device NUMA node>
 # microbench, 3 reps, interleaved; add --skip-native-register on XPU
 for rep in 1 2 3; do for c in 4k 2m; do
@@ -240,7 +240,7 @@ env $E numactl --cpunodebind=$N --preferred=$N python $B/model_tensor_offload/be
 
 - **Accelerator-agnostic:** `saved_activation_offload/bench.py` and `h2d_d2h/bench.py` use DeepSpeed's accelerator abstraction. Saved-activation offload runs under torchrun with `--zero2-gpu` (DSE `53096d8`). Ranks refuse to run discovery, so prepare manifests once with `--prepare-seqs` and `--discover-calib-seqs`.
 - **CUDA-only today:** `activation_offload/bench_8gpu.py`, used for the multi-device activation checkpoint and optimizer offload cells and for the single-device 256K rows. It calls the CUDA memory-statistics APIs directly (22 call sites), and its `--numa_bind node` uses `nvidia-smi`. Port those to `get_accelerator()` before Ascend or B60 runs, or report a named limitation.
-- **Per-rank binding:** `benchmarks/pin_memory/numa_bind_rank.sh` and `bench_8gpu.py --numa_bind node` map each rank to its device's NUMA node through `nvidia-smi` and `CUDA_VISIBLE_DEVICES`. On Ascend, use the NPU's PCI `numa_node` with `ASCEND_RT_VISIBLE_DEVICES`. On B60, use the GPU's PCI `numa_node` with `ZE_AFFINITY_MASK`. Confirm the result with `numactl --show` inside a rank.
+- **Per-rank binding:** `benchmarks/cpu_offload/numa_bind_rank.sh` and `bench_8gpu.py --numa_bind node` map each rank to its device's NUMA node through `nvidia-smi` and `CUDA_VISIBLE_DEVICES`. On Ascend, use the NPU's PCI `numa_node` with `ASCEND_RT_VISIBLE_DEVICES`. On B60, use the GPU's PCI `numa_node` with `ZE_AFFINITY_MASK`. Confirm the result with `numactl --show` inside a rank.
 - **`torchrun --numa-binding`:** we used it on CUDA only. Check that it works on your device; if it does not, report the cell as not available.
 - **`deepspeed --bind_cores_to_rank`:** device-agnostic, but it splits cores by local rank order, not by device. Check that device numbering follows NUMA order on your host, and report the mapping.
 - **Pinned arm:** Ascend uses native-registered pinning (`aclrtHostRegisterV2`; parity with Torch's pinning is unmeasured). B60 uses Torch's XPU pinning (`--skip-native-register`), because native has no XPU registration hook and would copy at pageable speed.

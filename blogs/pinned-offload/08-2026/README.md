@@ -1,6 +1,6 @@
 <!--
 EDITOR NOTES (not rendered). Short blog, 2026-11-13. There is no long report (dropped 2026-11-14): the how (flags per framework,
-setup, method, reproduction commands) lives in the DeepSpeedExamples benchmarks/pin_memory README. Per-row step times
+setup, method, reproduction commands) lives in the DeepSpeedExamples benchmarks/cpu_offload README. Per-row step times
 and job IDs are in the hidden source comments below and in ARXIV_DRAFT.md as of commit 3d2fd3b (git history). Headings follow the blog layout in LAYOUT.md.
 
 Blocks publish:
@@ -25,7 +25,7 @@ This blog shows:
 2. How PyTorch-ecosystem frameworks support pinning, NUMA placement, and CPU threads.
 3. Best practices.
 
-The [benchmark README](https://github.com/sfc-gh-truwase/DeepSpeedExamples/tree/tjruwase/pin-memory-experiments/benchmarks/pin_memory) in DeepSpeedExamples has the setup, the method, the settings for each framework, and the commands to reproduce every result.
+The [benchmark README](https://github.com/sfc-gh-truwase/DeepSpeedExamples/tree/tjruwase/pin-memory-experiments/benchmarks/cpu_offload) in DeepSpeedExamples has the setup, the method, the settings for each framework, and the commands to reproduce every result.
 
 ## Performance impact of tuning
 
@@ -148,7 +148,7 @@ Can launcher binding replace binding each process by hand with a low-level tool 
 
 <!-- Evidence: ARXIV_DRAFT.md at 3d2fd3b. Single H200 (job-20261113T215205Z), DeepSpeed launcher vs per-process numactl --cpunodebind --preferred, pageable -> pinned: model-tensor 10.55 -> 3.86 vs 10.36 -> 3.75 s; checkpoint 256K 52.07 -> 45.44 vs 52.04 -> 45.42 s; saved-activation 64K 90.81 -> 33.11 vs 89.91 -> 33.06 s. 8xH200: saved-activation pin 2.53x vs 2.56x (Qwen3-8B), 2.57x vs 2.55x (Qwen3.5-9B); optimizer offload 15.41 -> 9.78 vs 15.53 -> 9.73 s; copies within 0.4 GB/s. torchrun pageable lags (single H200 saved-activation 124.67 s vs 90.81 s), pinned ties. Gaps from deepspeed/utils/numa.py (cores by local rank; -m only when a rank's cores fit one node; no core list = all physical cores, so no -m with one process) and torch/numa/binding.py (numactl --physcpubind only). Because the launcher matches numactl, the numactl-bound H200 results the blog still cites (registration, huge pages, backend tie) carry over; a launcher rerun is not required. -->
 
-The [benchmark README](https://github.com/sfc-gh-truwase/DeepSpeedExamples/tree/tjruwase/pin-memory-experiments/benchmarks/pin_memory) lists the flags and settings for each framework.
+The [benchmark README](https://github.com/sfc-gh-truwase/DeepSpeedExamples/tree/tjruwase/pin-memory-experiments/benchmarks/cpu_offload) lists the flags and settings for each framework.
 
 ## Best practices
 
@@ -164,7 +164,7 @@ CPU offload buys capacity with host memory, and three host-side settings decide 
 
 As future work, we plan to extend this study to machines where the CPU and accelerator share a coherent chip-to-chip (C2C) link instead of PCIe, such as NVIDIA Grace Hopper and Grace Blackwell. There, the accelerator can access host memory over that link, including pageable memory, and accelerator memory can appear as its own NUMA node. Whether pinning, NUMA placement, and CPU threads play the same roles there is an open question.
 
-The benchmarks, the settings for each framework, and the commands to reproduce every result are in [DeepSpeedExamples `benchmarks/pin_memory`](https://github.com/sfc-gh-truwase/DeepSpeedExamples/tree/tjruwase/pin-memory-experiments/benchmarks/pin_memory). <!-- TODO: switch to deepspeedai/DeepSpeedExamples master. -->
+The benchmarks, the settings for each framework, and the commands to reproduce every result are in [DeepSpeedExamples `benchmarks/cpu_offload`](https://github.com/sfc-gh-truwase/DeepSpeedExamples/tree/tjruwase/pin-memory-experiments/benchmarks/cpu_offload). <!-- TODO: switch to deepspeedai/DeepSpeedExamples master. -->
 
 ## Contributors
 

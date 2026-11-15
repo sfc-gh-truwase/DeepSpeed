@@ -45,13 +45,13 @@ so `T = t_f + t_d` at N=1 and `T = max(t_f, t_d)` for **N ≥ 2**. Real MLPs sav
 
 ## 1. Where the code lives, and why
 
-**All of it in DeepSpeedExamples.** New subfolder `benchmarks/pin_memory/saved_activation_offload/`, alongside the existing `activation_offload/`, `model_tensor_offload/`, `h2d_d2h/`.
+**All of it in DeepSpeedExamples.** New subfolder `benchmarks/cpu_offload/saved_activation_offload/`, alongside the existing `activation_offload/`, `model_tensor_offload/`, `h2d_d2h/`.
 
 Rationale:
 
 1. **No DeepSpeed change is required.** The credit engine only calls already-public accelerator APIs on `master`: `get_accelerator().pin_memory(t, make_copy=False)`, `.is_pinned()`, `.unpin_memory()`, `.Stream`, `.Event`, `.current_stream()`, `.on_accelerator()`, `.is_synchronized_device()`. Verified against `accelerator/abstract_accelerator.py` and `accelerator/cuda_accelerator.py`.
 2. It is an experiment, not a feature. Landing credit scheduling on DeepSpeed `master` would force a config surface decision that the blog explicitly does not want to make.
-3. `benchmarks/pin_memory/common.py` already provides the subprocess-arm plumbing every sibling bench uses (`run_arm_subprocess`, `print_arm_result`, `print_driver_result`, `parse_arm_result`, `dist_env`, `build_hf_causal_lm`, `param_numel`, `patch_cpp_extension_drop_cxx17`).
+3. `benchmarks/cpu_offload/common.py` already provides the subprocess-arm plumbing every sibling bench uses (`run_arm_subprocess`, `print_arm_result`, `print_driver_result`, `parse_arm_result`, `dist_env`, `build_hf_causal_lm`, `param_numel`, `patch_cpp_extension_drop_cxx17`).
 
 **XPU / Arc Pro B70 is out of scope for this experiment plan.** Do not treat the native-vs-torch pin-backend issue on XPU as a prerequisite or publish gate for application (3). Applications (1) and (2) may still fix that harness separately.
 
@@ -72,7 +72,7 @@ Pinned arm for this bench: CUDA `native` + `REGISTER_DEVICE=1`, plus `is_pinned`
 Keep the bench small. Policy and JSON assembly live in `bench.py` until they become independently large.
 
 ```
-benchmarks/pin_memory/saved_activation_offload/
+benchmarks/cpu_offload/saved_activation_offload/
 ├── README.md            # repro commands, arms, known limitations
 ├── bench.py             # CLI, arms, driver, discovery/manifest, metrics JSON
 └── credit_offload.py    # CreditPool, HostBufferPool, CreditBoundedOffloadEngine,
@@ -289,7 +289,7 @@ def _issue_h2d(g):                           # always under a bwd credit
     # do NOT arm on h2d_event — that would release dest HBM too early (D12)
 
 def last_layer_backward_pre_hook(module, grad_output):
-    # skip-last layer never offloaded; use it to seed prefetch of L-2 .. 
+    # skip-last layer never offloaded; use it to seed prefetch of L-2 ..
     seed_prefetch_window(start=module._ds_layer_idx - skip_last)
 
 def scope_full_backward_pre_hook(module, grad_output):

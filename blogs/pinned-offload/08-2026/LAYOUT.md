@@ -1,6 +1,6 @@
 # Proposed layout — Efficient CPU Offload
 
-**Article files:** [`README.md`](README.md) is the short blog (2026-11-13). There is no long report (user, 2026-11-14): `ARXIV_DRAFT.md` was removed, and the how (flags and settings per framework, setup, method, reproduction commands) moved to the [DeepSpeedExamples `benchmarks/pin_memory` README](https://github.com/sfc-gh-truwase/DeepSpeedExamples/tree/tjruwase/pin-memory-experiments/benchmarks/pin_memory), which the blog links to. Per-row step times and job IDs stay in the blog's hidden source comments; the removed draft is in git history at commit 3d2fd3b. B60 rows, bound Ascend reruns, and Ascend/B60 multi-device results are pending.\
+**Article files:** [`README.md`](README.md) is the short blog (2026-11-13). There is no long report (user, 2026-11-14): `ARXIV_DRAFT.md` was removed, and the how (flags and settings per framework, setup, method, reproduction commands) moved to the [DeepSpeedExamples `benchmarks/cpu_offload` README](https://github.com/sfc-gh-truwase/DeepSpeedExamples/tree/tjruwase/pin-memory-experiments/benchmarks/cpu_offload), which the blog links to. Per-row step times and job IDs stay in the blog's hidden source comments; the removed draft is in git history at commit 3d2fd3b. B60 rows, bound Ascend reruns, and Ascend/B60 multi-device results are pending.\
 **Figures:** `media/`, one panel per machine, one chart per model family.\
 **Source of the argument:** [`BLOG_PLAN.md`](BLOG_PLAN.md). This file is the heading layout only.
 
@@ -37,7 +37,7 @@ Short and high level (user, 2026-11-13): results as speedups only, no step-time 
 
 ## DeepSpeedExamples benchmark README
 
-The [benchmark README](https://github.com/sfc-gh-truwase/DeepSpeedExamples/tree/tjruwase/pin-memory-experiments/benchmarks/pin_memory) holds what the blog leaves out: how to apply each setting (pinning in ZeRO offload, activation checkpoint offload, and the pin APIs; launcher binding, numactl, and threads), the flags per framework, what did not help, the setup, the method rules (including the three numactl-bound supporting results), and the commands to reproduce every published row. Keep it in step with the blog when a published number or setting changes.
+The [benchmark README](https://github.com/sfc-gh-truwase/DeepSpeedExamples/tree/tjruwase/pin-memory-experiments/benchmarks/cpu_offload) holds what the blog leaves out: how to apply each setting (pinning in ZeRO offload, activation checkpoint offload, and the pin APIs; launcher binding, numactl, and threads), the flags per framework, what did not help, the setup, the method rules (including the three numactl-bound supporting results), and the commands to reproduce every published row. Keep it in step with the blog when a published number or setting changes.
 
 Technical details that the removed draft carried and the blog leaves out (for example, the Ascend remote-node cost on pinned device-to-host copies, ~26%) are not published anywhere now; recover them from commit 3d2fd3b if a later write-up needs them.
 
