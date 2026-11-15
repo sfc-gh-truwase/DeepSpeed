@@ -161,6 +161,8 @@ The [full technical report](ARXIV_DRAFT.md) lists the flags and settings for eac
 
 CPU offload buys capacity with host memory, and three host-side settings decide how much speed that capacity costs. Pinning is the biggest single lever when the step is dominated by copies, giving up to 3.79× on one H200 and 2.57× on eight, both on Qwen3.5 saved-activation offload against a bound pageable baseline. When the CPU computes, as with an offloaded optimizer, CPU threads matter as much, and the three settings together made an 8-GPU optimizer-offload step 2.84× to 3.08× faster than an untuned launch. Keep pinning on, bind each rank to its accelerator's NUMA node, and give the CPU optimizer its cores.
 
+As future work, we plan to extend this study to machines where the CPU and accelerator share a coherent chip-to-chip (C2C) link instead of PCIe, such as NVIDIA Grace Hopper and Grace Blackwell. There, the accelerator can access host memory over that link, including pageable memory, and accelerator memory can appear as its own NUMA node. Whether pinning, NUMA placement, and CPU threads play the same roles there is an open question.
+
 The benchmarks are in [DeepSpeedExamples `benchmarks/pin_memory`](https://github.com/sfc-gh-truwase/DeepSpeedExamples/tree/tjruwase/pin-memory-experiments/benchmarks/pin_memory), and the [full technical report](ARXIV_DRAFT.md) has the details. <!-- TODO: switch to deepspeedai/DeepSpeedExamples master and the arXiv link. -->
 
 ## Contributors

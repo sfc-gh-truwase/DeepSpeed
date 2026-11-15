@@ -202,7 +202,7 @@ Set `OMP_NUM_THREADS` to the cores per rank, or use the DS launcher. torchrun's 
 
 ## Conclusion
 
-Lead with the levers: pinning biggest when copy-bound (H200 single-GPU Qwen3 1.15×–2.74× under DeepSpeed's launcher; Qwen3.5 about the same except saved-activation 3.79×; Ascend range from the bound rerun), host levers as large when the CPU computes (8×H200 Qwen3-32B: threads 1.51×, pinning 1.70×, all 3.08×; add the Ascend and B60 multi-device results). Four portable findings, checked on every machine. Close with the gaps: no XPU host registration; saved-activation offload is a benchmark.
+Lead with the levers: pinning biggest when copy-bound (H200 single-GPU Qwen3 1.15×–2.74× under DeepSpeed's launcher; Qwen3.5 about the same except saved-activation 3.79×; Ascend range from the bound rerun), host levers as large when the CPU computes (8×H200 Qwen3-32B: threads 1.51×, pinning 1.70×, all 3.08×; add the Ascend and B60 multi-device results). Four portable findings, checked on every machine. Close with the gaps: no XPU host registration; saved-activation offload is a benchmark. Then future work: extend the study to C2C machines (Grace Hopper, Grace Blackwell), where a coherent chip-to-chip link replaces PCIe (user, 2026-11-14); the blog conclusion gets one sentence on the same.
 
 ## Contributors
 

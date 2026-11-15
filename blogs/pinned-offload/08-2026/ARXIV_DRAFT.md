@@ -593,6 +593,8 @@ Pinning is the right default, with binding and threads set at launch. The except
 
 Two gaps remain. DeepSpeed does not yet register host memory on Intel XPU, so the native backend there is lock-only. Saved-activation offload is a benchmark, not a configuration option, even though on the H200 it is the application with the most to gain from pinning. <!-- TODO: once the Ascend and B60 multi-device results land, extend the host-lever sentence above with them and say whether the four findings held on every machine. -->
 
+Future work: extend this study to C2C machines, where the CPU and accelerator share a coherent chip-to-chip link instead of PCIe, such as NVIDIA Grace Hopper (GH200) and Grace Blackwell (GB200). Every machine here copies over PCIe. On a C2C machine the accelerator can access host memory over that faster link, including pageable memory when address translation is enabled, and depending on the driver's memory mode, accelerator memory can itself be a NUMA node, so binding to the accelerator's node could place offload buffers in accelerator memory. The open questions are whether pageable memory still needs staging through CPU threads, how much of pinning's advantage remains, what NUMA placement means when the accelerator's memory is itself a NUMA node, and whether the same three settings are still the ones to tune. <!-- Preliminary GH200 copy, activation checkpoint, and saved-activation measurements exist (EXPERIMENTS_HANDOFF.md section 2, item 6) but are not part of this study. -->
+
 ## Contributors
 
 <!-- TODO: contributor list (DeepSpeed, Snowflake, Intel, Huawei Ascend). -->
