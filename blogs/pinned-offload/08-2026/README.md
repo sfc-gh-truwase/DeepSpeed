@@ -40,27 +40,17 @@ We evaluated four workloads. The first measures the copies themselves; the other
 
 On a single device, the two activation workloads also offload the optimizer, and pinning covers its host buffers too. The multi-device activation runs keep the optimizer on the accelerator.
 
-We ran them on three accelerator types: NVIDIA H200, Huawei Ascend 910B4, and Intel Arc Pro B60, each within a single host (multi-node runs were not tested). Each training workload uses two Hugging Face model families in separate tables: Qwen3 (dense) and Qwen3.5 (hybrid linear and full attention), randomly initialized, in bf16, at batch size 1. Model size and sequence length differ by machine, so compare results within a column, not across columns. The benchmark README lists hardware and software versions. Where a speedup comes from a bound run, the binding is a launcher's own, never an external tool; the benchmark README notes the few supporting results that were bound with numactl instead.
+We ran them on three accelerator types: NVIDIA H200, Huawei Ascend 910B4, and Intel Arc Pro B60, each within a single host (multi-node runs were not tested). Each training workload uses two Hugging Face model families, reported side by side in the single-device table and in separate multi-device tables: Qwen3 (dense) and Qwen3.5 (hybrid linear and full attention), randomly initialized, in bf16, at batch size 1. Model size and sequence length differ by machine, so compare results within a column, not across columns. The benchmark README lists hardware and software versions. Where a speedup comes from a bound run, the binding is a launcher's own, never an external tool; the benchmark README notes the few supporting results that were bound with numactl instead.
 
 ### Single device: pinning
 
-<!-- FIGURE: media/single_device.png — pin speedup per workload, one panel per machine, Qwen3 and Qwen3.5 as separate charts. -->
+<!-- FIGURE: media/single_device.png — pin speedup per workload, one panel per machine, Qwen3 and Qwen3.5 side by side. -->
 
-**Qwen3**
-
-| Workload | H200, Qwen3-8B | Ascend 910B4, Qwen3-4B | Arc Pro B60 |
-|----------|----------------|------------------------|-------------|
-| Model-tensor offload | **2.73×** (4K tokens) | *pending* | *pending* |
-| Activation checkpoint offload | **1.15×** (256K) | *pending* | *pending* |
-| Saved-activation offload | **2.74×** (64K) | *pending* | *pending* |
-
-**Qwen3.5**
-
-| Workload | H200, Qwen3.5-9B | Ascend 910B4, Qwen3.5-4B | Arc Pro B60 |
-|----------|------------------|--------------------------|-------------|
-| Model-tensor offload | **2.78×** (4K tokens) | *pending* | *pending* |
-| Activation checkpoint offload | **1.15×** (256K) | *pending* | *pending* |
-| Saved-activation offload | **3.79×** (64K) | *pending* | *pending* |
+| Workload | H200 (Qwen3-8B / Qwen3.5-9B) | Ascend 910B4 (Qwen3-4B / Qwen3.5-4B) | Arc Pro B60 |
+|----------|------------------------------|--------------------------------------|-------------|
+| Model-tensor offload | **2.73×** / **2.78×** (4K tokens) | *pending* | *pending* |
+| Activation checkpoint offload | **1.15×** / **1.15×** (256K) | *pending* | *pending* |
+| Saved-activation offload | **2.74×** / **3.79×** (64K) | *pending* | *pending* |
 
 <!-- TODO: Ascend columns from the bound rerun; B60 columns. Earlier unbound Ascend placeholders, not publishable under the launcher-binding rule: Qwen3-4B model-tensor 1.85x (1K), 1.47x (2K), checkpoint 1.23x (8K), saved-activation 1.14x (2K); Qwen3.5-4B model-tensor 1.32x (512), 1.29x (1K), checkpoint 1.08x (8K). -->
 
