@@ -15,7 +15,7 @@ Short and high level (user, 2026-11-13): results as speedups only, no step-time 
 ## Introduction
 ## Performance impact of tuning
 ### Workloads and hardware
-### Single device: pinning
+### Single device: pinning speedup
 ### Multiple devices: pinning, NUMA placement, and CPU threads
 ### Host-device copies
 ### What the results show
