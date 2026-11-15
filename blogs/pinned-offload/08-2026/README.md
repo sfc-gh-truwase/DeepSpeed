@@ -40,19 +40,22 @@ We evaluated four workloads. The first measures the copies themselves; the other
 
 On a single device, the two activation workloads also offload the optimizer, and pinning covers its host buffers too. The multi-device activation runs keep the optimizer on the accelerator.
 
-We ran them on three accelerator types: NVIDIA H200, Huawei Ascend 910B4, and Intel Arc Pro B60, each within a single host (multi-node runs were not tested). Each training workload uses two Hugging Face model families, reported side by side in the single-device table and in separate multi-device tables: Qwen3 (dense) and Qwen3.5 (hybrid linear and full attention), randomly initialized, in bf16, at batch size 1. Model size and sequence length differ by machine, so compare results within a column, not across columns. The benchmark README lists hardware and software versions. Where a speedup comes from a bound run, the binding is a launcher's own, never an external tool; the benchmark README notes the few supporting results that were bound with numactl instead.
+We ran them on three accelerator types: NVIDIA H200, Huawei Ascend 910B4, and Intel Arc Pro B60, each within a single host (multi-node runs were not tested). Each training workload uses two Hugging Face model families, reported as separate rows in the single-device table and in separate multi-device tables: Qwen3 (dense) and Qwen3.5 (hybrid linear and full attention), randomly initialized, in bf16, at batch size 1. Model size and sequence length differ by machine, so compare results within a column, not across columns. The benchmark README lists hardware and software versions. Where a speedup comes from a bound run, the binding is a launcher's own, never an external tool; the benchmark README notes the few supporting results that were bound with numactl instead.
 
 ### Single device: pinning
 
-<!-- FIGURE: media/single_device.png — pin speedup per workload, one panel per machine, Qwen3 and Qwen3.5 side by side. -->
+<!-- FIGURE: media/single_device.png — pin speedup per workload, one panel per machine, Qwen3 and Qwen3.5 as separate bars. -->
 
-| Workload | H200 (Qwen3-8B / Qwen3.5-9B) | Ascend 910B4 (Qwen3-4B / Qwen3.5-4B) | Arc Pro B60 |
-|----------|------------------------------|--------------------------------------|-------------|
-| Model-tensor offload | **2.73×** / **2.78×** (4K tokens) | *pending* | *pending* |
-| Activation checkpoint offload | **1.15×** / **1.15×** (256K) | *pending* | *pending* |
-| Saved-activation offload | **2.74×** / **3.79×** (64K) | *pending* | *pending* |
+| Machine | Model | Model-tensor offload | Activation checkpoint offload | Saved-activation offload |
+|---------|-------|----------------------|-------------------------------|--------------------------|
+| H200 | Qwen3-8B | **2.73×** (4K tokens) | **1.15×** (256K) | **2.74×** (64K) |
+| H200 | Qwen3.5-9B | **2.78×** (4K) | **1.15×** (256K) | **3.79×** (64K) |
+| Ascend 910B4 | Qwen3-4B | *pending* | *pending* | *pending* |
+| Ascend 910B4 | Qwen3.5-4B | *pending* | *pending* | *pending* |
+| Arc Pro B60 | Qwen3-0.6B | *pending* | *pending* | *pending* |
+| Arc Pro B60 | Qwen3.5-0.8B | *pending* | *pending* | *pending* |
 
-<!-- TODO: Ascend columns from the bound rerun; B60 columns. Earlier unbound Ascend placeholders, not publishable under the launcher-binding rule: Qwen3-4B model-tensor 1.85x (1K), 1.47x (2K), checkpoint 1.23x (8K), saved-activation 1.14x (2K); Qwen3.5-4B model-tensor 1.32x (512), 1.29x (1K), checkpoint 1.08x (8K). -->
+<!-- TODO: Ascend rows from the bound rerun; B60 rows (model sizes per BLOG_PLAN.md). Earlier unbound Ascend placeholders, not publishable under the launcher-binding rule: Qwen3-4B model-tensor 1.85x (1K), 1.47x (2K), checkpoint 1.23x (8K), saved-activation 1.14x (2K); Qwen3.5-4B model-tensor 1.32x (512), 1.29x (1K), checkpoint 1.08x (8K). -->
 
 Speedup is the pageable step time divided by the pinned step time, with both runs under DeepSpeed's launcher binding (the process's cores and memory on the accelerator's NUMA node), the fairest pageable baseline we found. On the H200, the 256K checkpoint-offload steps pack 4K-token samples, while saved-activation offload trains one 64K-token sequence. torchrun's binding covers CPUs only, so it left H200 pageable steps up to 1.6× slower; its pin ratios ran 1.31× to 5.94×, against 1.15× to 3.79× with memory bound as well, overstating what pinning adds to a well-placed job. Pinning helped every workload on every machine we measured. The gain tracks how much of the step is copying: on the H200, model-tensor and saved-activation offload move the most data and gain the most, while checkpoint offload copies one tensor per layer and gains least. Qwen3.5 saved-activation offload gains most of all, plausibly because its linear-attention layers add compute only linearly with sequence length, so copies stay most of the step.
 
