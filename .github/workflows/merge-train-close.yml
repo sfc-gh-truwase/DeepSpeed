@@ -1,0 +1,39 @@
+name: merge-train-close
+
+# After a merge-train aggregate PR (merge-train.yml) is merged, closes every
+# original PR it batched, pointing authors at where their change landed
+# (ci/merge_train_close.sh).
+
+on:
+  pull_request_target:
+    types: [closed]
+
+permissions:
+  contents: read
+
+jobs:
+  close-originals:
+    if: github.event.pull_request.merged == true && contains(github.event.pull_request.labels.*.name, 'bulk-merge-pr')
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      pull-requests: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+          lfs: false
+          submodules: false
+
+      - name: Close the batched originals
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          PR_BODY: ${{ github.event.pull_request.body }}
+        # PR_BODY is untrusted (author-controlled) text, so it's passed via env,
+        # never interpolated into the run: script -- bash reads it from the
+        # environment inside merge_train_close.sh instead.
+        run: bash ci/merge_train_close.sh "$PR_NUMBER" "$PR_BODY"

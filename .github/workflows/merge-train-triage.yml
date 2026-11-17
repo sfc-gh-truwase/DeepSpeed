@@ -1,0 +1,45 @@
+name: merge-train-triage
+
+# Scans open PRs every few hours and auto-labels merge-train / roadmap-pr
+# candidates per the heuristic in .github/merge-train-config.yml (ci/merge_train_triage.sh).
+# This only labels/comments; the aggregate batch PR is opened separately by
+# merge-train.yml. See CONTRIBUTING.md ("Merge-train for small PRs").
+
+on:
+  schedule:
+    - cron: '17 */3 * * *'
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: 'Log intended label/comment actions without calling write APIs'
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+jobs:
+  triage:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      pull-requests: write
+      issues: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+          lfs: false
+          submodules: false
+
+      - name: Install PyYAML
+        run: pip install --quiet pyyaml
+
+      - name: Triage open PRs
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+          DRY_RUN: ${{ inputs.dry_run || 'false' }}
+        run: bash ci/merge_train_triage.sh
