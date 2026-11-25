@@ -31,16 +31,16 @@ The [benchmark README](https://github.com/sfc-gh-truwase/DeepSpeedExamples/tree/
 
 ### Workloads and hardware
 
-We evaluated four workloads and measured the speedup of using pinned memory over pageable memory. The first three are offload training workloads, which can be combined in one job, and every training run used DeepSpeed; the last measures the copies themselves:
+We evaluated four workloads and measured how much faster each runs when the settings are tuned, starting with pinned versus pageable host memory. The first three are offload training workloads, which can be combined in one job; every training run used DeepSpeed. The last measures the copies themselves:
 
 - **Model-tensor offload.** Parameters and optimizer states live in host memory and are copied to the accelerator as needed (DeepSpeed ZeRO CPU offload). The multi-device runs offload only the optimizer and keep the parameters on the accelerator.
 - **Activation checkpoint offload.** The inputs saved by activation checkpointing go to host memory in the forward pass and come back for recomputation (DeepSpeed CPU checkpointing).
 - **Saved-activation offload.** Every tensor saved for the backward pass inside each decoder layer goes to host memory and comes back, with no recomputation. This one is a DeepSpeedExamples recipe built on DeepSpeed's pinned memory, accelerator APIs, and ZeRO engine; the offload logic itself lives in the recipe, not in DeepSpeed.
 - **Host-device copies.** A microbenchmark that copies 256 MiB host buffers to the accelerator and back, the transfer every offload workload depends on.
 
-On a single device, the two activation workloads also offload the optimizer, and pinning covers its host buffers too. The multi-device activation runs keep the optimizer on the accelerator.
+On a single accelerator, the two activation workloads also offload the optimizer, and pinning covers its host buffers too. The multi-device activation runs keep the optimizer on the accelerator.
 
-We ran the training workloads on three accelerator types with two Hugging Face model families:
+We ran every workload on three accelerator types; the training workloads used two Hugging Face model families:
 
 | Accelerator | Qwen3 (dense) | Qwen3.5 (hybrid linear and full attention) |
 |-------------|---------------|--------------------------------------------|
@@ -50,7 +50,7 @@ We ran the training workloads on three accelerator types with two Hugging Face m
 
 <!-- TODO: B60 model sizes once collected (BLOG_PLAN.md: Qwen3-0.6B or 1.7B, Qwen3.5-0.8B or 2B, by host RAM); Ascend multi-device model sizes. -->
 
-Every run is on a single host (multi-node runs were not tested), with randomly initialized models in bf16 at batch size 1. We picked a model size or sequence length that needs offload for stable training: without it, training either runs out of device memory or runs so close to the limit that a small change can push it over. Model size and sequence length differ by machine, so compare results within a column, not across columns. <!-- Fit evidence (H200, ARXIV_DRAFT.md at 3d2fd3b). Saved-activation lengths are measured against training without checkpointing, its no-recomputation counterpart; plain checkpointing still fits them. single-device checkpoint offload 256K: plain checkpointing runs out of device memory on Qwen3.5-9B and fits Qwen3-8B with 3.7 GB to spare. Single-device saved-activation 64K: offloaded activations are about 7.3 MB per token per rank (about 480 GB at 64K), far beyond 141 GB, so no-offload training cannot fit (arithmetic, not a measured wall). Single-device model-tensor 4K: Qwen3-8B with AdamW on the GPU needs about 128 GB for weights, gradients, and optimizer state before activations (arithmetic, not measured). 8xH200 optimizer offload 4K: GPU AdamW does not fit Qwen3-32B and fits Qwen3.5-27B with about 14.5 GB to spare. 8xH200 checkpoint offload 256K per GPU: past the checkpointing-only walls (233,472 and 208,896 tokens per GPU). 8xH200 saved-activation 16K per GPU: past the no-checkpointing walls (14,336 and 10,240). Ascend and B60 lengths should follow the same rule. --> The benchmark README lists hardware and software versions. Where a speedup comes from a bound run, the binding is a launcher's own, never an external tool; the benchmark README notes the few supporting results that were bound with numactl instead.
+Every run is on a single host (multi-node runs were not tested), with randomly initialized models in bf16 at batch size 1. We picked a model size or sequence length that needs offload for stable training: without it, training either runs out of accelerator memory or runs so close to the limit that a small change can push it over. Model size and sequence length differ by machine, so compare results within a column, not across columns. <!-- Fit evidence (H200, ARXIV_DRAFT.md at 3d2fd3b). Saved-activation lengths are measured against training without checkpointing, its no-recomputation counterpart; plain checkpointing still fits them. single-device checkpoint offload 256K: plain checkpointing runs out of device memory on Qwen3.5-9B and fits Qwen3-8B with 3.7 GB to spare. Single-device saved-activation 64K: offloaded activations are about 7.3 MB per token per rank (about 480 GB at 64K), far beyond 141 GB, so no-offload training cannot fit (arithmetic, not a measured wall). Single-device model-tensor 4K: Qwen3-8B with AdamW on the GPU needs about 128 GB for weights, gradients, and optimizer state before activations (arithmetic, not measured). 8xH200 optimizer offload 4K: GPU AdamW does not fit Qwen3-32B and fits Qwen3.5-27B with about 14.5 GB to spare. 8xH200 checkpoint offload 256K per GPU: past the checkpointing-only walls (233,472 and 208,896 tokens per GPU). 8xH200 saved-activation 16K per GPU: past the no-checkpointing walls (14,336 and 10,240). Ascend and B60 lengths should follow the same rule. --> The benchmark README lists hardware and software versions.
 
 ### Single device: pinning speedup
 
@@ -67,11 +67,13 @@ Every run is on a single host (multi-node runs were not tested), with randomly i
 
 <!-- TODO: Ascend column from the bound rerun; B60 column (model sizes per BLOG_PLAN.md). Earlier unbound Ascend placeholders, not publishable under the launcher-binding rule: Qwen3-4B model-tensor 1.85x (1K), 1.47x (2K), checkpoint 1.23x (8K), saved-activation 1.14x (2K); Qwen3.5-4B model-tensor 1.32x (512), 1.29x (1K), checkpoint 1.08x (8K). -->
 
-Speedup is the pageable step time divided by the pinned step time, with both runs under DeepSpeed's launcher binding (the process's cores and memory on the accelerator's NUMA node), the fairest pageable baseline we found. On the H200, the 256K checkpoint-offload steps pack 4K-token samples, while saved-activation offload trains one 64K-token sequence. torchrun's binding covers CPU cores only, so it left H200 pageable steps up to 1.6× slower; its pin ratios ran 1.31× to 5.94×, against 1.15× to 3.79× with memory bound as well, overstating what pinning adds to a well-placed job. Pinning helped every workload on every machine we measured. The gain tracks how much of the step is copying: on the H200, model-tensor and saved-activation offload move the most data and gain the most, while checkpoint offload copies one tensor per layer and gains least. Qwen3.5 saved-activation offload gains most of all, plausibly because its linear-attention layers add compute only linearly with sequence length, so copies stay most of the step.
+Speedup is the pageable step time divided by the pinned step time, with both runs under DeepSpeed's launcher binding (the process's cores and memory on the accelerator's NUMA node), the fairest pageable baseline we found. Where a speedup comes from a bound run, the binding is a launcher's own, never an external tool; the benchmark README notes the few supporting results that were bound with numactl instead. On the H200, the 256K checkpoint-offload steps pack 4K-token samples, while saved-activation offload trains one 64K-token sequence. torchrun's binding covers CPU cores only, so it left H200 pageable steps up to 1.6× slower; its pin ratios ran 1.31× to 5.94×, against 1.15× to 3.79× with memory bound as well, overstating what pinning adds to a well-placed job.
+
+Pinning helped every workload on every machine we measured. The gain tracks how much of the step is copying: on the H200, model-tensor and saved-activation offload move the most data and gain the most, while checkpoint offload copies one tensor per layer and gains least. Qwen3.5 saved-activation offload gains most of all, plausibly because its linear-attention layers add compute only linearly with sequence length, so copies stay most of the step.
 
 ### Multiple devices: pinning, NUMA placement, and CPU threads
 
-With several ranks on one host, the ranks share host memory, sockets, and cores, so placement and threads start to matter alongside pinning. The tables below start from an untuned launch (ranks unbound, memory pageable, one OpenMP thread per rank), on 8×H200. Pinning is off in this launch, although DeepSpeed pins by default. Each number is the untuned step time divided by the step time with the named setting changed; **All** changes every setting that applies to the workload. NUMA binding and **All** use DeepSpeed's launcher binding, except where noted below.
+With several ranks on one host, the ranks share host memory, sockets, and cores, so placement and threads start to matter alongside pinning. The tables below start from an untuned launch (ranks unbound, memory pageable even though DeepSpeed pins by default, one OpenMP thread per rank), on 8×H200. Each number is the untuned step time divided by the step time with the named setting changed; **All** changes every setting that applies to the workload. NUMA binding and **All** use DeepSpeed's launcher binding, except where noted below.
 
 <!-- FIGURE: media/levers.png — speedup from the untuned launch for each setting alone and all together, one group per workload, one panel per machine. -->
 
@@ -95,7 +97,13 @@ With several ranks on one host, the ranks share host memory, sockets, and cores,
 
 <!-- Sources, optimizer offload: Pinning, NUMA binding, and All from job-20261113T151443Z, all against that job's untuned launch (torchrun unbound, one thread). Qwen3-32B untuned 28.83 s; pinned 17.18 s (1.68x); torchrun --numa-binding=node 32.52 s (0.89x); deepspeed --bind_cores_to_rank pageable 15.35 s (1.88x), pinned 9.71 s (2.97x). Qwen3.5-27B untuned 22.82 s; pinned 14.06 s (1.62x); torchrun binding 21.33 s (1.07x); DeepSpeed launcher pageable 12.61 s (1.81x), pinned 7.97 s (2.86x). CPU threads from job-20261111T024327Z (unbound, 12 threads, pageable): 30.16 -> 20.02 s (1.51x), 22.71 -> 14.67 s (1.55x). Earlier drafts divided the Nov 11 untuned step by later launcher times (3.08x, 1.96x, 2.84x, 1.80x); replaced 2026-11-14. Activation checkpoint: job-20261112T192249Z. Saved-activation: job-20261110T223544Z. -->
 
-A dash means the setting does not apply: the activation workloads keep the optimizer on the GPU, so there is no host compute to thread. DeepSpeed's launcher always sets threads along with binding, so for optimizer offload the NUMA binding column uses torchrun's core-only binding with one thread. It did not help (0.89× and 1.07×), because torchrun binds cores but not memory. With pinning off, DeepSpeed's binding and threads together gave 1.88× on Qwen3-32B and 1.81× on Qwen3.5-27B; with pinning on, that launch is the **All** column. The optimizer-offload CPU threads column comes from an earlier job, against the untuned launch in that job. The checkpoint-offload rows pack 4K-token samples into each step; the saved-activation rows train one 16K-token sequence per GPU.
+Notes on the tables:
+
+- A dash means the setting does not apply: the activation workloads keep the optimizer on the GPU, so there is no host compute to thread.
+- DeepSpeed's launcher always sets threads along with binding, so for optimizer offload the NUMA binding column uses torchrun's core-only binding with one thread. It did not help (0.89× and 1.07×), because torchrun binds cores but not memory.
+- With pinning off, DeepSpeed's binding and threads together gave 1.88× on Qwen3-32B and 1.81× on Qwen3.5-27B; with pinning on, that launch is the **All** column.
+- The optimizer-offload CPU threads column comes from an earlier job, against the untuned launch in that job.
+- The checkpoint-offload rows pack 4K-token samples into each step; the saved-activation rows train one 16K-token sequence per GPU.
 
 Because the starting point is unbound and pageable, the Pinning column also recovers some of the slowdown that binding fixes. Against a pageable run bound by DeepSpeed's launcher, pinning alone was 1.10× for Qwen3-8B checkpoint offload and 2.53× (Qwen3-8B) and 2.57× (Qwen3.5-9B) for saved-activation offload.
 
@@ -103,11 +111,11 @@ Offload is also what makes these runs fit. With the optimizer on the GPU, checkp
 
 ### Host-device copies
 
-The step-time gains come from faster copies. The table gives the pinned speedup for 256 MiB copies in each direction, per device, bound to the accelerator's NUMA node, with one device copying and with every device in the host copying at once (eight on the H200 server, bound by DeepSpeed's launcher).
+The step-time gains come from faster copies. The table gives the pinned speedup for 256 MiB copies in each direction, per accelerator, bound to its NUMA node, with one accelerator copying and with every accelerator in the host copying at once (eight on the H200 server, bound by DeepSpeed's launcher).
 
 <!-- FIGURE: media/h2d_d2h.png — pinned speedup per direction, one panel per machine, one device and all devices copying. -->
 
-| Machine | Direction | One device copying | All devices copying |
+| Machine | Direction | One accelerator copying | All accelerators copying |
 |---------|-----------|--------------------|---------------------|
 | H200 | Host to device | **5.3×** | **3.3×** |
 | H200 | Device to host | **3.1×** | **1.7×** |
@@ -125,8 +133,8 @@ Only part of a step is copying: on one H200, host-to-device copies were 5.3× fa
 - **Pinning is the biggest single lever when the step is copy-bound.** From an untuned start, it alone made 8-GPU Qwen3-8B saved-activation offload 5.98× faster, against 2.49× for NUMA binding alone. Against a bound pageable run it was still 2.53×.
 - **When the CPU computes, threads matter as much as pinning.** With the optimizer offloaded, CPU Adam is host compute that pinning cannot speed up. On 8-GPU Qwen3-32B, giving it 12 threads per rank was worth 1.51×, close to pinning's 1.68×, and all three settings together gave 2.97×. The settings interact: a pinned step with one thread was still slower than a pageable step with binding and threads.
 - **Pinning makes placement matter less, not zero.** On 8×H200, binding moved the pageable step by up to 2.8×, a gain binding cores alone did not capture. The pinned step moved by about 5% or less, except on Qwen3.5: 23% for saved-activation offload and 11% for optimizer offload with 12 threads; binding cores alone closed both. An unbound comparison can overstate the benefit of pinning by up to 2.4×.
-- **Contention caps multi-device pinned copies.** On our 8×H200 server, pinned copy bandwidth per GPU halved when all eight GPUs copied, while pageable bandwidth fell only 15–17%, so the per-GPU pin advantage shrank from 5.3× to 3.3× host to device.
-- **Registration, not page-locking, makes host memory fast.** On the H200, memory that was locked but not registered with the device driver copied at pageable speed.
+- **Contention caps multi-device pinned copies.** With all eight H200 GPUs copying at once, the per-GPU pin advantage shrank from 5.3× to 3.3× host to device.
+- **Registration, not page-locking, makes host memory fast.** On the H200, memory that was locked but not registered with the accelerator's driver copied at pageable speed.
 - **Some settings did not help.** On the H200, huge pages changed step time by at most 4% once placement was fixed, and the two pinning backends tied once memory was registered.
 
 ## Framework support in the PyTorch ecosystem
