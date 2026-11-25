@@ -21,7 +21,7 @@ CPU offload is an important technique for scaling training. By keeping model sta
 
 This blog shows:
 
-1. The performance impact of tuning these settings on four workloads (host-device copies and three offload training workloads), across three accelerator types, on single-device and multi-device runs.
+1. The performance impact of tuning these settings on four workloads (three offload training workloads and host-device copies), across three accelerator types, on single-device and multi-device runs.
 2. How PyTorch-ecosystem frameworks support pinning, NUMA placement, and CPU threads.
 3. Best practices.
 
@@ -31,16 +31,26 @@ The [benchmark README](https://github.com/sfc-gh-truwase/DeepSpeedExamples/tree/
 
 ### Workloads and hardware
 
-We evaluated four workloads. The first measures the copies themselves; the other three are offload training workloads, which can be combined in one job, and every training run used DeepSpeed:
+We evaluated four workloads and measured the speedup of using pinned memory over pageable memory. The first three are offload training workloads, which can be combined in one job, and every training run used DeepSpeed; the last measures the copies themselves:
 
-- **Host-device copies.** A microbenchmark that copies 256 MiB host buffers to the accelerator and back, the transfer every offload workload depends on.
 - **Model-tensor offload.** Parameters and optimizer states live in host memory and are copied to the accelerator as needed (DeepSpeed ZeRO CPU offload). The multi-device runs offload only the optimizer and keep the parameters on the accelerator.
 - **Activation checkpoint offload.** The inputs saved by activation checkpointing go to host memory in the forward pass and come back for recomputation (DeepSpeed CPU checkpointing).
 - **Saved-activation offload.** Every tensor saved for the backward pass inside each decoder layer goes to host memory and comes back, with no recomputation. This one is a DeepSpeedExamples recipe built on DeepSpeed's pinned memory, accelerator APIs, and ZeRO engine; the offload logic itself lives in the recipe, not in DeepSpeed.
+- **Host-device copies.** A microbenchmark that copies 256 MiB host buffers to the accelerator and back, the transfer every offload workload depends on.
 
 On a single device, the two activation workloads also offload the optimizer, and pinning covers its host buffers too. The multi-device activation runs keep the optimizer on the accelerator.
 
-We ran them on three accelerator types: NVIDIA H200, Huawei Ascend 910B4, and Intel Arc Pro B60, each within a single host (multi-node runs were not tested). Each training workload uses two Hugging Face model families, reported as separate rows in the single-device table and in separate multi-device tables: Qwen3 (dense) and Qwen3.5 (hybrid linear and full attention), randomly initialized, in bf16, at batch size 1. We picked a model size or sequence length that needs offload for stable training: without it, training either runs out of device memory or runs so close to the limit that a small change can push it over. Model size and sequence length differ by machine, so compare results within a column, not across columns. <!-- Fit evidence (H200, ARXIV_DRAFT.md at 3d2fd3b). Saved-activation lengths are measured against training without checkpointing, its no-recomputation counterpart; plain checkpointing still fits them. single-device checkpoint offload 256K: plain checkpointing runs out of device memory on Qwen3.5-9B and fits Qwen3-8B with 3.7 GB to spare. Single-device saved-activation 64K: offloaded activations are about 7.3 MB per token per rank (about 480 GB at 64K), far beyond 141 GB, so no-offload training cannot fit (arithmetic, not a measured wall). Single-device model-tensor 4K: Qwen3-8B with AdamW on the GPU needs about 128 GB for weights, gradients, and optimizer state before activations (arithmetic, not measured). 8xH200 optimizer offload 4K: GPU AdamW does not fit Qwen3-32B and fits Qwen3.5-27B with about 14.5 GB to spare. 8xH200 checkpoint offload 256K per GPU: past the checkpointing-only walls (233,472 and 208,896 tokens per GPU). 8xH200 saved-activation 16K per GPU: past the no-checkpointing walls (14,336 and 10,240). Ascend and B60 lengths should follow the same rule. --> The benchmark README lists hardware and software versions. Where a speedup comes from a bound run, the binding is a launcher's own, never an external tool; the benchmark README notes the few supporting results that were bound with numactl instead.
+We ran the training workloads on three accelerator types with two Hugging Face model families:
+
+| Accelerator | Qwen3 (dense) | Qwen3.5 (hybrid linear and full attention) |
+|-------------|---------------|--------------------------------------------|
+| NVIDIA H200 | 8B; 32B for multi-device optimizer offload | 9B; 27B for multi-device optimizer offload |
+| Huawei Ascend 910B4 | 4B | 4B |
+| Intel Arc Pro B60 | *pending* | *pending* |
+
+<!-- TODO: B60 model sizes once collected (BLOG_PLAN.md: Qwen3-0.6B or 1.7B, Qwen3.5-0.8B or 2B, by host RAM); Ascend multi-device model sizes. -->
+
+Every run is on a single host (multi-node runs were not tested), with randomly initialized models in bf16 at batch size 1. We picked a model size or sequence length that needs offload for stable training: without it, training either runs out of device memory or runs so close to the limit that a small change can push it over. Model size and sequence length differ by machine, so compare results within a column, not across columns. <!-- Fit evidence (H200, ARXIV_DRAFT.md at 3d2fd3b). Saved-activation lengths are measured against training without checkpointing, its no-recomputation counterpart; plain checkpointing still fits them. single-device checkpoint offload 256K: plain checkpointing runs out of device memory on Qwen3.5-9B and fits Qwen3-8B with 3.7 GB to spare. Single-device saved-activation 64K: offloaded activations are about 7.3 MB per token per rank (about 480 GB at 64K), far beyond 141 GB, so no-offload training cannot fit (arithmetic, not a measured wall). Single-device model-tensor 4K: Qwen3-8B with AdamW on the GPU needs about 128 GB for weights, gradients, and optimizer state before activations (arithmetic, not measured). 8xH200 optimizer offload 4K: GPU AdamW does not fit Qwen3-32B and fits Qwen3.5-27B with about 14.5 GB to spare. 8xH200 checkpoint offload 256K per GPU: past the checkpointing-only walls (233,472 and 208,896 tokens per GPU). 8xH200 saved-activation 16K per GPU: past the no-checkpointing walls (14,336 and 10,240). Ascend and B60 lengths should follow the same rule. --> The benchmark README lists hardware and software versions. Where a speedup comes from a bound run, the binding is a launcher's own, never an external tool; the benchmark README notes the few supporting results that were bound with numactl instead.
 
 ### Single device: pinning speedup
 
@@ -54,8 +64,6 @@ We ran them on three accelerator types: NVIDIA H200, Huawei Ascend 910B4, and In
 | | Qwen3.5 | **1.15×** (256K) | *pending* | *pending* |
 | Saved-activation offload | Qwen3 | **2.74×** (64K) | *pending* | *pending* |
 | | Qwen3.5 | **3.79×** (64K) | *pending* | *pending* |
-
-Model sizes differ by machine: Qwen3-8B and Qwen3.5-9B on the H200, and Qwen3-4B and Qwen3.5-4B on the Ascend 910B4. <!-- TODO: B60 model sizes once collected (BLOG_PLAN.md: Qwen3-0.6B or 1.7B, Qwen3.5-0.8B or 2B, by host RAM). -->
 
 <!-- TODO: Ascend column from the bound rerun; B60 column (model sizes per BLOG_PLAN.md). Earlier unbound Ascend placeholders, not publishable under the launcher-binding rule: Qwen3-4B model-tensor 1.85x (1K), 1.47x (2K), checkpoint 1.23x (8K), saved-activation 1.14x (2K); Qwen3.5-4B model-tensor 1.32x (512), 1.29x (1K), checkpoint 1.08x (8K). -->
 
